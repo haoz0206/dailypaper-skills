@@ -1,0 +1,6 @@
+interface:
+  display_name: "Daily Papers Review"
+  short_description: "Review candidates and create the daily recommendation note"
+  default_prompt: "Use $daily-papers-review to review the prepared paper candidates."
+policy:
+  allow_implicit_invocation: false

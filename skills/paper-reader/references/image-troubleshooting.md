@@ -10,8 +10,8 @@ ar5iv 的 asset 编号（x1.png, x2.png...）**不一定对应论文的 Figure �
 - 某些 Figure 是由多个小图拼成的
 
 **解决方法**:
-1. 用 WebFetch 获取页面时，提取每个 Figure 标题和对应的 img src
-2. 下载后**必须验证** — Read 每张图片确认内容正确
+1. 获取页面时，提取每个 Figure 标题和对应的 img src
+2. 下载后**必须验证** — 打开每张图片确认内容正确
 3. 文件 < 10KB 时必须重新检查
 
 ## 多源 fallback 策略
@@ -19,28 +19,30 @@ ar5iv 的 asset 编号（x1.png, x2.png...）**不一定对应论文的 Figure �
 当 arXiv HTML 获取失败或图片不完整时，按顺序尝试：
 
 ### 来源 A: arXiv HTML（首选）
-- WebFetch `https://arxiv.org/html/{arxiv_id}` → 提取 `<figure>` 的 img src
+- 获取 `https://arxiv.org/html/{arxiv_id}` → 提取 `<figure>` 的 img src
 - 先统计论文 Figure 总数，确保提取完整
 
 ### 来源 B: 项目主页（补充）
 - 从论文摘要/HTML 中查找项目主页（关键词：`project page`、`github.io`、`our website`）
-- WebFetch 项目主页，提取展示图片（teaser / demo 图）
+- 获取项目主页，提取展示图片（teaser / demo 图）
 - 适合获取 arXiv HTML 中缺失的方法概览图
 
 ### 来源 C: PDF 提取（最终 fallback）
 ```bash
-wget -O /tmp/paper.pdf "https://arxiv.org/pdf/{arxiv_id}.pdf"
+PAPER_TMP_DIR="$(mktemp -d)"
+trap 'rm -f "$PAPER_TMP_DIR/paper.pdf"; rmdir "$PAPER_TMP_DIR"' EXIT
+curl -fsSL -o "$PAPER_TMP_DIR/paper.pdf" "https://arxiv.org/pdf/{arxiv_id}.pdf"
 mkdir -p {笔记所在目录}/assets/
-pdfimages -png /tmp/paper.pdf {笔记所在目录}/assets/{方法名}_fig
+pdfimages -png "$PAPER_TMP_DIR/paper.pdf" {笔记所在目录}/assets/{方法名}_fig
 ```
-提取后验证：文件 >10KB、Read 确认内容正确。
+提取后验证：文件 >10KB，并打开图片确认内容正确。
 
 ## 选择性本地化（解决外链不可达）
 
 arXiv 外链在某些网络环境下不稳定。笔记保存后自动运行可达性检查：
 
 ```bash
-python3 ../daily-papers/download_note_images.py "{笔记路径}"
+python3 "{SKILLS_ROOT}/daily-papers/download_note_images.py" "{笔记路径}"
 ```
 
 脚本行为：
@@ -52,7 +54,7 @@ python3 ../daily-papers/download_note_images.py "{笔记路径}"
 
 ## 图片 URL 规范化（防止路径重复）
 
-WebFetch 返回的图片路径可能是**相对路径**（如 `2603.05312v1/x1.png`），也可能是**已解析的绝对路径**。
+网页返回的图片路径可能是**相对路径**（如 `2603.05312v1/x1.png`），也可能是**已解析的绝对路径**。
 拼接 URL 时极易出现路径重复 bug（如 `.../2603.05312v1/2603.05312v1/x1.png`）。
 
 **铁律**: 写入笔记前，必须对每个图片 URL 执行以下检查：

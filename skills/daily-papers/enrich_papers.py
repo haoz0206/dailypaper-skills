@@ -2,23 +2,32 @@
 """Batch-enrich arXiv papers with metadata from HTML/abs pages.
 
 Usage:
-    cat /tmp/daily_papers_top30.json | python3 enrich_papers.py > /tmp/daily_papers_enriched.json
+    python3 enrich_papers.py --input /path/to/candidates.json --output /path/to/enriched.json
 
-Input:  JSON array via stdin (format from daily-papers Phase 2)
-Output: JSON array via stdout with enriched fields added
+    # Backward-compatible positional form
+    python3 enrich_papers.py input.json output.json
+
+    # Stdin/stdout form
+    cat input.json | python3 enrich_papers.py
+
+Input:  JSON array via stdin or auto-detected file
+Output: JSON array via stdout or file with enriched fields added
 
 Architecture:
     - asyncio + subprocess curl for concurrent HTTP requests
     - Semaphore(10) to avoid hammering arXiv
-    - Pure regex HTML parsing (no WebFetch / no external deps)
+    - Pure regex HTML parsing (no host-specific web tool / no external Python deps)
     - Per-request timeout via curl --max-time (no Python-level per-paper timeout)
 """
+from __future__ import annotations
 
 import asyncio
+import argparse
 import json
 import re
 import sys
 from collections import Counter
+from pathlib import Path
 
 SEMAPHORE_LIMIT = 10
 CURL_TIMEOUT = 30
@@ -129,7 +138,10 @@ def extract_figure_url(html: str, arxiv_id: str) -> str:
         if url.startswith("/"):
             url = "https://arxiv.org" + url
         elif not url.startswith("http"):
-            url = "https://arxiv.org/html/" + url
+            if re.match(r"\d{4}\.\d{4,5}v\d+/", url):
+                url = "https://arxiv.org/html/" + url
+            else:
+                url = f"https://arxiv.org/html/{arxiv_id}/" + url
         return url
     return ""
 
@@ -327,7 +339,7 @@ async def extract_affiliations_pdf(arxiv_id: str, sem: asyncio.Semaphore,
                 cmd = (
                     f'curl -sL --max-time {CURL_TIMEOUT} "https://arxiv.org/pdf/{arxiv_id}"'
                     f" | pdftotext -l 2 - -"
-                    f" | python3 {EXTRACT_AFFILIATIONS_SCRIPT}"
+                    f" | {sys.executable} {EXTRACT_AFFILIATIONS_SCRIPT}"
                 )
                 proc = await asyncio.create_subprocess_shell(
                     cmd,
@@ -465,10 +477,31 @@ async def enrich_all(papers: list[dict]) -> list[dict]:
 
 
 def main():
-    # Optional: output file path as first argument (more robust than stdout redirect)
-    output_path = sys.argv[1] if len(sys.argv) > 1 else None
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", type=Path, help="Read candidate JSON from this file")
+    parser.add_argument("--output", type=Path, help="Write enriched JSON to this file")
+    parser.add_argument(
+        "legacy_paths",
+        nargs="*",
+        type=Path,
+        help="Deprecated positional input/output paths kept for compatibility",
+    )
+    args = parser.parse_args()
+    if len(args.legacy_paths) > 2:
+        parser.error("at most two positional paths are supported")
 
-    input_data = sys.stdin.read()
+    input_path = args.input or (
+        args.legacy_paths[0] if args.legacy_paths else None
+    )
+    output_path = args.output or (
+        args.legacy_paths[1] if len(args.legacy_paths) == 2 else None
+    )
+
+    input_data = (
+        input_path.read_text(encoding="utf-8", errors="replace")
+        if input_path
+        else sys.stdin.read()
+    )
     if not input_data.strip():
         _write_output("[]", output_path)
         return
@@ -489,15 +522,18 @@ def main():
     print(f"Done. Enriched {len(enriched)} papers.", file=sys.stderr)
 
     output = json.dumps(enriched, ensure_ascii=False, indent=2) + "\n"
+
     _write_output(output, output_path)
 
 
-def _write_output(data: str, output_path: str | None):
+def _write_output(data: str, output_path: Path | None):
     """Write output to file (if path given) or stdout with explicit flush."""
     if output_path:
-        with open(output_path, "w") as f:
-            f.write(data)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(data, encoding="utf-8")
     else:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         sys.stdout.write(data)
         sys.stdout.flush()
 

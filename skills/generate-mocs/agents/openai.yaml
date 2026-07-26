@@ -1,0 +1,6 @@
+interface:
+  display_name: "Generate MOCs"
+  short_description: "Rebuild Obsidian indexes for paper and concept notes"
+  default_prompt: "Use $generate-mocs to refresh the paper and concept indexes."
+policy:
+  allow_implicit_invocation: true

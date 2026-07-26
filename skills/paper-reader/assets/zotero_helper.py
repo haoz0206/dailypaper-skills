@@ -9,6 +9,7 @@ import os
 import shutil
 import argparse
 import sys
+import tempfile
 from pathlib import Path
 
 _SHARED_DIR = Path(__file__).resolve().parents[2] / "_shared"
@@ -21,7 +22,8 @@ from user_config import zotero_db_path, zotero_storage_dir
 ZOTERO_DB = zotero_db_path()
 STORAGE_DIR = zotero_storage_dir()
 ZOTERO_DIR = ZOTERO_DB.parent
-TEMP_DB = Path("/tmp/zotero_readonly.sqlite")
+_TEMP_DIR = tempfile.TemporaryDirectory(prefix="zotero-helper-")
+TEMP_DB = Path(_TEMP_DIR.name) / "zotero_readonly.sqlite"
 
 
 def copy_db():

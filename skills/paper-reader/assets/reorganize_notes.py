@@ -17,7 +17,7 @@ _SHARED_DIR = Path(__file__).resolve().parents[2] / "_shared"
 if str(_SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(_SHARED_DIR))
 
-from user_config import paper_notes_dir, zotero_db_path
+from user_config import paper_notes_dir, paths_config, zotero_db_path
 
 # 配置
 PAPER_NOTES_ROOT = paper_notes_dir()
@@ -209,9 +209,11 @@ def determine_category(tags: List[str], title: str = "") -> str:
 def get_all_notes() -> List[Path]:
     """获取所有论文笔记"""
     notes = []
+    concepts_root = (PAPER_NOTES_ROOT / paths_config()["concepts_folder"]).resolve()
     for root, dirs, files in os.walk(PAPER_NOTES_ROOT):
         # 跳过概念目录
-        if '_概念' in root:
+        root_path = Path(root).resolve()
+        if root_path == concepts_root or concepts_root in root_path.parents:
             continue
         for f in files:
             if f.endswith('.md'):

@@ -23,6 +23,8 @@ import json
 import sqlite3
 import shlex
 import subprocess
+import shutil
+import tempfile
 import time
 import argparse
 import logging
@@ -44,14 +46,30 @@ ZOTERO_STORAGE = str(zotero_storage_dir())
 OBSIDIAN_VAULT = str(obsidian_vault_path())
 PAPER_NOTES_ROOT = str(paper_notes_dir())
 CONCEPTS_ROOT = str(concepts_dir())
-_DAEMON_STATE_DIR = os.path.expanduser(os.environ.get("PAPER_DAEMON_STATE_DIR", "~/.codex"))
+_XDG_STATE_HOME = Path(
+    os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")
+).expanduser()
+_DAEMON_STATE_DIR = str(
+    Path(
+        os.environ.get(
+            "PAPER_DAEMON_STATE_DIR",
+            _XDG_STATE_HOME / "dailypaper",
+        )
+    ).expanduser().resolve()
+)
 _CODEX_BIN = os.environ.get("PAPER_DAEMON_CODEX_BIN", "codex")
 _CODEX_WORKDIR = os.environ.get("PAPER_DAEMON_CODEX_WORKDIR", OBSIDIAN_VAULT)
 _CODEX_MODEL = os.environ.get("PAPER_DAEMON_CODEX_MODEL", "").strip()
 _CODEX_EXTRA_ARGS = os.environ.get("PAPER_DAEMON_CODEX_ARGS", "")
+_CODEX_SEARCH = os.environ.get("PAPER_DAEMON_CODEX_SEARCH", "").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 PROGRESS_FILE = os.path.join(_DAEMON_STATE_DIR, "paper_daemon_progress.json")
 LOG_FILE = os.path.join(_DAEMON_STATE_DIR, "paper_daemon.log")
 PID_FILE = os.path.join(_DAEMON_STATE_DIR, "paper_daemon.pid")
+_DAEMON_TEMP_DIR = tempfile.TemporaryDirectory(prefix="paper-daemon-")
 
 # Rate limit 配置
 INITIAL_WAIT = 60          # 初始等待时间（秒）
@@ -164,8 +182,8 @@ def parse_reset_wait_seconds(message: str) -> Optional[int]:
 
 def copy_zotero_db() -> str:
     """复制 Zotero 数据库以避免锁定"""
-    tmp_db = "/tmp/zotero_readonly.sqlite"
-    subprocess.run(["cp", ZOTERO_DB, tmp_db], check=True)
+    tmp_db = str(Path(_DAEMON_TEMP_DIR.name) / "zotero_readonly.sqlite")
+    shutil.copy(ZOTERO_DB, tmp_db)
     return tmp_db
 
 
@@ -328,7 +346,7 @@ def get_existing_notes() -> dict[str, str]:
         for md_file in notes_dir.rglob("*.md"):
             name = md_file.stem
             relative_parts = md_file.relative_to(notes_dir).parts
-            # 跳过 _inbox, _概念 等特殊目录和目录页
+            # 跳过 _inbox、_concepts 等特殊目录和目录页
             if any(part.startswith("_") for part in relative_parts):
                 continue
             if md_file.parent.name == name:
@@ -405,6 +423,34 @@ def save_progress(progress: dict):
         json.dump(progress, f, indent=2, ensure_ascii=False)
 
 
+def build_codex_command(prompt: str) -> list[str]:
+    """Build a command using current documented non-interactive Codex flags."""
+    cmd = [
+        _CODEX_BIN,
+        "-a",
+        "never",
+        "-s",
+        "workspace-write",
+        "-C",
+        _CODEX_WORKDIR,
+    ]
+    if _CODEX_SEARCH:
+        cmd.append("--search")
+    if _CODEX_MODEL:
+        cmd.extend(["--model", _CODEX_MODEL])
+    cmd.extend(
+        [
+            "exec",
+            "--skip-git-repo-check",
+            "--ephemeral",
+        ]
+    )
+    if _CODEX_EXTRA_ARGS:
+        cmd.extend(shlex.split(_CODEX_EXTRA_ARGS))
+    cmd.append(prompt)
+    return cmd
+
+
 def call_codex(paper_source: dict, collection_path: str, item_id: int) -> tuple[bool, str]:
     """
     调用 Codex 处理论文
@@ -447,9 +493,9 @@ def call_codex(paper_source: dict, collection_path: str, item_id: int) -> tuple[
         if arxiv_id:
             fallback_steps.extend(
                 [
-                    f"1. **arXiv HTML 版本**（推荐）: 用 WebFetch 读取 https://arxiv.org/html/{arxiv_id}，可直接获取图片 URL",
-                    f"2. **arXiv 摘要页**: 用 WebFetch 读取 https://arxiv.org/abs/{arxiv_id}",
-                    f"3. **arXiv PDF**: 下载 https://arxiv.org/pdf/{arxiv_id}.pdf 到本地后用 Read 读取",
+                    f"1. **arXiv HTML 版本**（推荐）: 获取 https://arxiv.org/html/{arxiv_id}，可直接获得图片 URL",
+                    f"2. **arXiv 摘要页**: 获取 https://arxiv.org/abs/{arxiv_id}",
+                    f"3. **arXiv PDF**: 下载 https://arxiv.org/pdf/{arxiv_id}.pdf 到本地读取",
                 ]
             )
         if paper_source.get('doi'):
@@ -469,7 +515,7 @@ def call_codex(paper_source: dict, collection_path: str, item_id: int) -> tuple[
 优先使用 HTML 版本，因为可以直接获取在线图片链接！
 """
 
-    prompt = f"""请使用 `paper-reader` skill 读取并分析这篇论文，生成完整的结构化笔记。
+    prompt = f"""请使用 $paper-reader 读取并分析这篇论文，生成完整的结构化笔记。
 
 {source_info}
 Zotero 分类路径: {collection_path}
@@ -543,7 +589,7 @@ $$公式$$
 1. 分析完论文后，列出笔记中所有 [[概念]] 链接
 2. 检查每个概念是否已存在：查看 `{concepts_root}` 下已有概念笔记
 3. 对于不存在的概念，创建概念笔记文件
-4. 使用 Write 工具写入概念笔记
+4. 将内容写入概念笔记
 
 ## 自动分类与 Zotero 同步（重要）
 
@@ -575,22 +621,8 @@ $$公式$$
 请直接开始处理，不需要确认。提取所有公式、图片和表格。"""
 
     try:
-        cmd = [
-            _CODEX_BIN,
-            'exec',
-            '--full-auto',
-            '--skip-git-repo-check',
-            '-C',
-            _CODEX_WORKDIR,
-        ]
-        if _CODEX_MODEL:
-            cmd.extend(['--model', _CODEX_MODEL])
-        if _CODEX_EXTRA_ARGS:
-            cmd.extend(shlex.split(_CODEX_EXTRA_ARGS))
-        cmd.append(prompt)
-
         result = subprocess.run(
-            cmd,
+            build_codex_command(prompt),
             capture_output=True,
             text=True,
             timeout=900  # 15分钟超时（因为要提取图片）
@@ -793,7 +825,7 @@ def main():
 
     # 检查是否已有进程在运行
     if not acquire_lock():
-        logger.error("另一个 paper_daemon 进程正在运行！请先停止它或删除 ~/.codex/paper_daemon.pid")
+        logger.error(f"另一个 paper_daemon 进程正在运行！请先停止它或检查 {PID_FILE}")
         return
 
     try:

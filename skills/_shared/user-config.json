@@ -1,11 +1,14 @@
 {
   "paths": {
-    "obsidian_vault": "/Users/yixfeng/Library/Mobile Documents/iCloud~md~obsidian/Documents/daily-paper",
+    "obsidian_vault": ".",
     "paper_notes_folder": "PaperNotes",
     "daily_papers_folder": "DailyPapers",
     "concepts_folder": "_concepts",
-    "zotero_db": "/Users/yixfeng/Zotero/zotero.sqlite",
-    "zotero_storage": "/Users/yixfeng/Zotero/storage"
+    "zotero_db": "~/Zotero/zotero.sqlite",
+    "zotero_storage": "~/Zotero/storage"
+  },
+  "runtime": {
+    "timezone": "Asia/Shanghai"
   },
   "daily_papers": {
     "keywords": [

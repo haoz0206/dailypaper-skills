@@ -15,7 +15,8 @@ description: |
 
 ## Step 0: 读取共享配置
 
-先读取 `../_shared/user-config.json`，如果 `../_shared/user-config.local.json` 存在，再用它覆盖默认值。
+将本 `SKILL.md` 所在目录的父目录解析为绝对路径 `SKILLS_ROOT`。读取
+`{SKILLS_ROOT}/_shared/user-config.json` 和可选的 `user-config.local.json`。
 
 显式生成并在后续统一使用这些变量：
 
@@ -26,7 +27,9 @@ description: |
 - `AUTO_REFRESH_INDEXES`
 - `GIT_COMMIT_ENABLED`
 - `GIT_PUSH_ENABLED`
-- `ENRICHED_INPUT = /tmp/daily_papers_enriched.json`
+- `RUN_MANIFEST`
+- `ENRICHED_INPUT = RUN_MANIFEST.paths.enriched`
+- `CHANGED_PATHS`
 
 其中：
 
@@ -39,9 +42,15 @@ description: |
 
 ## 前置检查
 
-1. 检查 `/tmp/daily_papers_enriched.json` 是否存在
+1. 检查 `RUN_MANIFEST` 和其中声明的 `ENRICHED_INPUT` 是否存在
 2. 检查今天的推荐文件 `{DAILY_PAPERS_PATH}/YYYY-MM-DD-论文推荐.md` 是否存在
 3. 如果任一不存在，告知用户需要先运行前置步骤，然后停止
+4. 检查通过后运行：
+
+   ```bash
+   python3 "{SKILLS_ROOT}/_shared/run_context.py" update "{RUN_MANIFEST}" \
+     --status writing-notes
+   ```
 
 ## 工作流程
 
@@ -49,7 +58,7 @@ description: |
 
 **1a: 提取概念列表**
 1. 扫描今天的推荐文件，提取所有 `[[...]]` 链接
-2. 额外从 `/tmp/daily_papers_enriched.json` 的 `method_names` 列表中提取所有方法名
+2. 额外从 `ENRICHED_INPUT` 的 `method_names` 列表中提取所有方法名
 3. 合并去重
 
 **1b: 过滤**
@@ -62,9 +71,9 @@ description: |
 **1c: 创建缺失的概念笔记（自动归类）**
 检查 `{CONCEPTS_PATH}/` 下是否已存在（搜索所有子目录）。对于缺失的概念，**根据概念类型自动归类到对应子目录**，不要全扔 `0-uncategorized/`。
 
-分类规则见 `../paper-reader/references/concept-categories.md`
+分类规则见 `{SKILLS_ROOT}/paper-reader/references/concept-categories.md`
 
-概念笔记模板见 `../paper-reader/references/concept-categories.md`
+概念笔记模板见 `{SKILLS_ROOT}/paper-reader/references/concept-categories.md`
 
 ### Step 2: 论文笔记生成
 
@@ -72,15 +81,20 @@ description: |
 
 1. 从今天的推荐文件中，读取分流表，筛选出标记为"必读"的论文（"值得看"和"可跳过"的不生成笔记）
 2. **质量检查已有笔记**（不是只看文件是否存在）：
-   - 对已有 `📒 **笔记**` 标记的论文，用 Glob 找到对应笔记文件，检查行数
+   - 对已有 `📒 **笔记**` 标记的论文，扫描笔记目录找到对应文件并检查行数
    - **行数 < 100 的视为骨架笔记，必须重新生成**（删除旧文件，重新调用 paper-reader）
    - 行数 >= 100 且包含 `## 关键公式` 和 `## 关键图表` 的才算合格，可以跳过
-3. 对每篇需要生成/重新生成的论文，调用 `paper-reader` skill（传入 arXiv 链接）
+3. 对每篇需要生成/重新生成的论文，读取并执行
+   `{SKILLS_ROOT}/paper-reader/SKILL.md`，传入 arXiv 链接，并明确设置
+   `DAILYPAPER_PARENT_RUN=true`，禁止它独立提交 Git
+   - **不要指定固定的输出路径**，让 paper-reader 自行决定文件名和分类目录
+   - paper-reader 会用方法名缩写作为文件名（如 `DAPL.md`），并自动分类到正确子目录
+   - 完成后扫描笔记目录，找到实际生成的文件路径和文件名，记录下来供 Step 3 回填
 4. 笔记生成后，paper-reader 会自动补充概念库，无需重复
 
 > **铁律**：不论论文数量多少，"必读"的论文**全部**生成笔记，一篇不能少。
 > 耗时长是正常的，不是偷懒的理由。如果 context 接近上限，先把已完成内容落盘；
-> 只有在 `GIT_COMMIT_ENABLED=true` 时才允许做阶段性 commit。然后告知用户剩余论文需要在新会话中继续，**绝对不能默默跳过**。
+> 保存当前 manifest 状态，然后告知用户剩余论文需要继续处理，**绝对不能默默跳过，也不能提交半成品**。
 
 #### ⚠️ 笔记质量硬性要求
 
@@ -103,9 +117,17 @@ description: |
 
 论文笔记全部生成完成后，将笔记链接回填到当天的推荐文件中。
 
+优先运行确定性脚本：
+
+```bash
+python3 "{SKILLS_ROOT}/daily-papers-notes/backfill_links.py" \
+  --recommendation "{DAILY_PAPERS_PATH}/YYYY-MM-DD-论文推荐.md" \
+  --notes-dir "{NOTES_PATH}"
+```
+
 **3a: 收集已有笔记**
 
-用 Glob 扫描 `{NOTES_PATH}/` 下所有子目录（跳过 `{CONCEPTS_PATH}`），获取所有 `.md` 文件列表，建立 `{文件名(不含.md): 相对路径}` 的索引。
+扫描 `{NOTES_PATH}/` 下所有子目录（跳过 `{CONCEPTS_PATH}`），获取所有 `.md` 文件列表，建立 `{文件名(不含.md): 相对路径}` 的索引。
 
 **3b: 匹配论文与笔记**
 
@@ -115,7 +137,7 @@ description: |
 2. 与 3a 的笔记索引匹配（不区分大小写）
 3. 也检查富化数据的 `method_names`（如果有残留数据）
 
-**3c: 插入笔记链接**
+**3c: 插入笔记链接 + 修正分流表**
 
 对匹配到笔记的论文，在 `- **来源**:` 行之后插入一行：
 
@@ -126,33 +148,59 @@ description: |
 其中 `笔记名` 是不含 `.md` 后缀的文件名（Obsidian 会自动解析到正确路径）。
 
 - 如果该论文已有 `📒 **已有笔记**` 或 `📒 **笔记**` 行，跳过不重复添加
-- 使用 Edit 工具逐篇插入，确保不破坏文件其他内容
+- 逐篇插入，确保不破坏文件其他内容
+
+**3d: 同步修正分流表 wikilink**
+
+paper-reader 生成笔记时会自行决定文件名（通常用方法名缩写，如 `DAPL`），可能与分流表中的 `[[wikilink]]` 不一致（如分流表写了 `[[Emerging Extrinsic Dexterity]]`）。因此回填时必须检查并修正：
+
+1. 对每篇已生成笔记的论文，拿到实际笔记文件名（如 `DAPL`）
+2. 在分流表（`## 分流表` 区域）中查找该论文的 `[[...]]` 链接
+3. 如果 wikilink 文本与实际笔记文件名不一致，替换为 `[[实际文件名]]`
+4. 同样检查论文详评标题下方是否有不一致的 wikilink，一并修正
 
 ### Step 4: 刷新 MOC 索引
 
 只有在 `AUTO_REFRESH_INDEXES=true` 时才执行：
 
 ```bash
-python3 ../_shared/generate_concept_mocs.py
-python3 ../_shared/generate_paper_mocs.py
+python3 "{SKILLS_ROOT}/_shared/generate_concept_mocs.py"
+python3 "{SKILLS_ROOT}/_shared/generate_paper_mocs.py"
 ```
 
 默认配置下这个开关是开启的，所以新增的概念和论文笔记通常会自动反映到各分类目录页中。
 
-### Step 5: Git 提交
+### Step 5: 最终验证与单一 Git 发布
 
-仅当 `GIT_COMMIT_ENABLED=true` 时执行，并且必须先检查：
+1. 确认所有必读论文笔记、概念、链接和 MOC 均已通过检查。
+2. 将本次实际创建或修改的 Vault 相对路径加入 `CHANGED_PATHS`，去重并确认没有
+   路径逃出 `VAULT_PATH`。每得到一个路径，都用 manifest 的 `--changed-path`
+   参数登记；该参数可重复传入：
 
-1. `VAULT_PATH/.git` 存在
-2. `git add -A` 后确实有 staged changes
+   ```bash
+   python3 "{SKILLS_ROOT}/_shared/run_context.py" update "{RUN_MANIFEST}" \
+     --changed-path "PaperNotes/实际生成的笔记.md"
+   ```
 
-满足条件后才 commit：
+3. 所有内容检查通过后，将状态更新为 `validated`。最终暂存路径以 manifest 中的
+   `changed_paths` 为唯一来源：
 
-```bash
-cd {VAULT_PATH} && git add -A && git commit -m "daily papers: notes YYYY-MM-DD"
-```
+   ```bash
+   python3 "{SKILLS_ROOT}/_shared/run_context.py" update "{RUN_MANIFEST}" \
+     --status validated
+   ```
 
-只有在 `GIT_PUSH_ENABLED=true` 且仓库已配置远端时才 push。
+4. 仅当 `GIT_COMMIT_ENABLED=true`、Vault 是 Git 仓库且开始运行时工作树干净，
+   才使用 `git add -- <CHANGED_PATHS...>` 精确暂存这些文件。
+5. 禁止使用 `git add -A`。如果发现不属于本次运行的 staged/dirty 文件，停止发布。
+6. 暂存内容非空时只创建一次提交：
+
+   ```bash
+   git -C "{VAULT_PATH}" commit -m "daily papers: YYYY-MM-DD"
+   ```
+
+7. 只有提交成功、`GIT_PUSH_ENABLED=true` 且已配置远端时才 push。push 失败时保留
+   本地提交并明确报告，不得重复生成内容。
 
 ## 输出
 
@@ -173,4 +221,5 @@ cd {VAULT_PATH} && git add -A && git commit -m "daily papers: notes YYYY-MM-DD"
   - 以"context overflow"为由跳过论文不生成笔记
   - 看到文件已存在就跳过，不检查质量
   - 生成笔记后不做质量验证
-- 如果 context 真的接近上限：先保存已完成的笔记；只有在 `GIT_COMMIT_ENABLED=true` 时才 commit。然后**明确告知用户**还有 N 篇未完成，需要在新会话中运行 `跑一下论文笔记` 继续。绝不能默默跳过
+- 如果 context 真的接近上限：先保存 manifest 和已完成的笔记，但不要 commit。
+  然后**明确告知用户**还有 N 篇未完成，需要继续运行同一个 manifest。绝不能默默跳过

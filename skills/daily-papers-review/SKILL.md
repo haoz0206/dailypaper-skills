@@ -15,7 +15,8 @@ description: |
 
 ## Step 0: 读取共享配置
 
-先读取 `../_shared/user-config.json`，如果 `../_shared/user-config.local.json` 存在，再用它覆盖默认值。
+将本 `SKILL.md` 所在目录的父目录解析为绝对路径 `SKILLS_ROOT`。读取
+`{SKILLS_ROOT}/_shared/user-config.json` 和可选的 `user-config.local.json`。
 
 显式生成并在后续统一使用这些变量：
 
@@ -26,7 +27,8 @@ description: |
 - `AUTO_REFRESH_INDEXES`
 - `GIT_COMMIT_ENABLED`
 - `GIT_PUSH_ENABLED`
-- `ENRICHED_INPUT = /tmp/daily_papers_enriched.json`
+- `RUN_MANIFEST`
+- `ENRICHED_INPUT = RUN_MANIFEST.paths.enriched`
 
 其中：
 
@@ -39,14 +41,20 @@ description: |
 
 ## 前置检查
 
-1. 检查 `/tmp/daily_papers_enriched.json` 是否存在
+1. 检查 `RUN_MANIFEST` 和其中声明的 `ENRICHED_INPUT` 是否存在
 2. 如果不存在，告知用户需要先运行 `跑一下论文抓取`，然后停止
+3. 检查通过后运行：
+
+   ```bash
+   python3 "{SKILLS_ROOT}/_shared/run_context.py" update "{RUN_MANIFEST}" \
+     --status reviewing
+   ```
 
 ## 工作流程
 
 ### Phase 4: 扫描 Obsidian 笔记库索引 + 匹配已有论文笔记
 
-由当前 Codex 会话直接完成，用 Glob 和 Read 工具扫描 Obsidian 笔记库：
+由当前 Codex 会话直接完成，使用可用的文件扫描和读取能力检查 Obsidian 笔记库：
 
 1. 扫描 `{NOTES_PATH}/` 下所有分类目录（跳过 `_` 开头但保留 `_inbox`），列出每个分类下的 `.md` 文件名
 2. 扫描 `{CONCEPTS_PATH}/` 下所有主题目录，列出每个主题下的概念笔记
@@ -205,7 +213,7 @@ description: |
 
 ### Phase 6: 保存到 Obsidian
 
-用 Write 工具保存到 `{DAILY_PAPERS_PATH}/YYYY-MM-DD-论文推荐.md`。
+保存到 `{DAILY_PAPERS_PATH}/YYYY-MM-DD-论文推荐.md`。
 
 文件开头加 YAML frontmatter：
 
@@ -222,6 +230,12 @@ tags: [daily-papers, auto-generated]
 保存后执行：
 
 1. **更新历史记录**：
+   - 优先运行确定性脚本：
+     ```bash
+     python3 "{SKILLS_ROOT}/daily-papers-review/update_history.py" \
+       --from-recommendation "{DAILY_PAPERS_PATH}/YYYY-MM-DD-论文推荐.md" \
+       --date YYYY-MM-DD
+     ```
    - 读取 `{DAILY_PAPERS_PATH}/.history.json`（不存在则创建空数组）
    - 提取本次推荐的所有 arXiv ID + 标题，追加为 `{"id": "XXXX", "date": "YYYY-MM-DD", "title": "..."}`
    - **去重规则**：如果某个 arXiv ID 已存在于 history 中，保留**最早的 date**（不要用今天的日期覆盖）
@@ -234,20 +248,17 @@ tags: [daily-papers, auto-generated]
      4. 验证：(今天新增) + (再推) 应该 >= 推荐文件中的论文数量
      5. 如果不匹配，重新扫描推荐文件补全缺失的条目
 
-2. **可选的 git 自动化**：
+2. 将推荐文件和 `.history.json` 的 Vault 相对路径加入本次运行的
+   `CHANGED_PATHS` 列表，并同步写入 manifest：
 
-仅当 `GIT_COMMIT_ENABLED=true` 时执行，并且必须按下面顺序检查：
+   ```bash
+   python3 "{SKILLS_ROOT}/_shared/run_context.py" update "{RUN_MANIFEST}" \
+     --changed-path "DailyPapers/YYYY-MM-DD-论文推荐.md" \
+     --changed-path "DailyPapers/.history.json"
+   ```
 
-   1. `VAULT_PATH/.git` 存在
-   2. `git add "{daily_papers_folder}/YYYY-MM-DD-论文推荐.md" "{daily_papers_folder}/.history.json"` 之后确实有 staged changes
-
-只有在上述条件都满足时才 commit：
-
-```bash
-cd {VAULT_PATH} && git add "{daily_papers_folder}/YYYY-MM-DD-论文推荐.md" "{daily_papers_folder}/.history.json" && git commit -m "daily papers: YYYY-MM-DD"
-```
-
-只有在 `GIT_PUSH_ENABLED=true` 且仓库已配置远端时才 push。
+   示例中的目录名必须替换为配置解析出的 Vault 相对路径。**本阶段不得 git add、
+   commit 或 push**；最终 notes 阶段统一发布。
 
 ## 输出
 
@@ -258,6 +269,6 @@ cd {VAULT_PATH} && git add "{daily_papers_folder}/YYYY-MM-DD-论文推荐.md" "{
 
 ## 注意事项
 
-- 如果 `/tmp/daily_papers_enriched.json` 不存在，必须先运行 `跑一下论文抓取`
+- 如果 manifest 或 `ENRICHED_INPUT` 不存在，必须先运行 `跑一下论文抓取`
 - 不生成论文笔记、不补充概念库（那是第 3 步的事）
-- 默认不做 git commit / push；这是显式开启的高级能力
+- 不做 git commit / push

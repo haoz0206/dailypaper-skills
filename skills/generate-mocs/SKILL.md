@@ -11,7 +11,8 @@ description: |
 
 ## Step 0: 读取共享配置
 
-先读取 `../_shared/user-config.json`，如果 `../_shared/user-config.local.json` 存在，再用它覆盖默认值。
+将本 `SKILL.md` 所在目录的父目录解析为绝对路径 `SKILLS_ROOT`。读取
+`{SKILLS_ROOT}/_shared/user-config.json` 和可选的 `user-config.local.json`。
 
 显式生成并在后续统一使用这些变量：
 
@@ -35,13 +36,13 @@ description: |
 1. 运行概念目录页脚本：
 
 ```bash
-python3 ../_shared/generate_concept_mocs.py
+python3 "{SKILLS_ROOT}/_shared/generate_concept_mocs.py"
 ```
 
 2. 运行论文目录页脚本：
 
 ```bash
-python3 ../_shared/generate_paper_mocs.py
+python3 "{SKILLS_ROOT}/_shared/generate_paper_mocs.py"
 ```
 
 3. 汇报：
@@ -60,9 +61,12 @@ python3 ../_shared/generate_paper_mocs.py
 只有在 `GIT_COMMIT_ENABLED=true` 时才做 git 操作，并且必须先检查：
 
 1. `VAULT_PATH/.git` 是否存在
-2. `git add` 之后是否真的有 staged changes
+2. 开始运行时工作树是否干净
+3. 从脚本输出收集本次实际新建或更新的 MOC 文件
+4. 仅用 `git -C "{VAULT_PATH}" add -- {本次 MOC 路径...}` 精确暂存
+5. 暂存区是否真的有变更，并且不包含本次运行之外的文件
 
-只有在上面两项都满足时才 commit。
+只有在上面各项都满足时才 commit。
 
 只有在 `GIT_PUSH_ENABLED=true` 且仓库已配置远端时才 push。
 

@@ -17,7 +17,9 @@
     └─ "更新索引" ──→ generate-mocs（Python 脚本）
 ```
 
-三步流水线的设计主要是为了控制单次上下文长度。每步之间通过 `/tmp` 下的 JSON 文件传数据。
+三步流水线的设计主要是为了控制单次上下文长度。入口首先创建独立
+`RunManifest`，三个阶段通过 manifest 中的运行级 JSON 路径传递数据，避免并发和失败
+重跑读到其他任务的文件。
 
 ---
 
@@ -30,7 +32,8 @@
 数据源：
 - HuggingFace Daily Papers API：`https://huggingface.co/api/daily_papers?date=YYYY-MM-DD`
 - HuggingFace Trending API：`https://huggingface.co/api/daily_papers?sort=trending`
-- arXiv API：`https://export.arxiv.org/api/query`，搜索 `cs.RO, cs.CV, cs.AI, cs.LG`
+- arXiv API：`https://export.arxiv.org/api/query`，分类来自
+  `daily_papers.arxiv_categories` 配置
 
 打分规则：
 - 命中 `negative_keywords` → 直接 -999 排除
@@ -45,7 +48,7 @@
 - 多天模式（days > 1）：跳过历史去重
 - 候选不足 20 篇时从历史回补
 
-输出：`/tmp/daily_papers_top30.json`
+输出：`{RUN_DIR}/candidates.json`
 
 ### 1.2 元数据富化（enrich_papers.py）
 
@@ -56,7 +59,7 @@
 - HTML 取不到时 fallback 到 `pdftotext` 提取机构
 - 再 fallback 到 arXiv abs 页面的 `<meta>` 标签
 
-输出：`/tmp/daily_papers_enriched.json`
+输出：`{RUN_DIR}/enriched.json`
 
 ---
 
@@ -66,7 +69,7 @@
 
 ### 2.1 扫描已有笔记
 
-Glob 扫描 Obsidian 的论文笔记和概念库目录，把候选论文跟已有笔记做匹配（方法名 / 标题模糊匹配），标记 `has_existing_note`。
+扫描 Obsidian 的论文笔记和概念库目录，把候选论文跟已有笔记做匹配（方法名 / 标题模糊匹配），标记 `has_existing_note`。
 
 ### 2.2 写锐评
 
@@ -85,7 +88,7 @@ Codex 以"毒舌但有料的资深研究员"角色点评每篇论文：
 
 - 写入 `{DAILY_PAPERS_PATH}/YYYY-MM-DD-论文推荐.md`
 - 更新 `.history.json`：追加今日推荐的 arXiv ID + 标题，只保留最近 30 天
-- 可选：git commit
+- 将变更路径加入当前 run；不在本阶段提交
 
 ---
 
@@ -120,28 +123,28 @@ Codex 以"毒舌但有料的资深研究员"角色点评每篇论文：
 ### 3.4 刷新目录页 + git
 
 - 调用 `generate_concept_mocs.py` 和 `generate_paper_mocs.py`
-- 可选：git commit & push
+- 全部验证成功后，可选地创建一次精确暂存的 git commit/push
 
 ---
 
 ## paper-reader
 
-**作为独立 skill 运行，完整工具链（Bash / Read / Write / Edit / WebFetch / WebSearch）。**
+**作为独立 Skill 运行，使用宿主当前可用的文件、命令和网络能力。**
 
 ### 输入源
 
 | 来源 | 处理方式 |
 |------|----------|
-| arXiv 链接 | WebFetch 抓取 |
+| arXiv 链接 | 优先获取 arXiv HTML，必要时下载 PDF |
 | 本地 PDF | 直接读取 |
 | Zotero 搜索 | 查 DB → 定位 PDF / 在线源 |
 | Zotero 分类批量 | 递归子分类 → 去重 → 逐篇处理 |
 
 找不到 PDF 时的 fallback 顺序：
-1. `zotero_helper.py info` 拿元数据
-2. 提取 arXiv ID → WebFetch HTML 版本（优先，能拿图）
-3. Fallback：PDF 版本 / DOI 页面
-4. 最后：WebSearch 论文标题
+1. arXiv URL 直接获取 HTML 版本（优先，能拿图），不访问 Zotero
+2. 明确的 Zotero 输入才用 `zotero_helper.py info` 定位元数据和本地 PDF
+3. Fallback：arXiv PDF / DOI 页面
+4. 最后：通过 arXiv API 或可用搜索能力检索论文标题
 5. 都不行 → 跳过
 
 ### 阅读模式
@@ -170,9 +173,10 @@ Codex 以"毒舌但有料的资深研究员"角色点评每篇论文：
 
 ### 存储
 
-- 路径：`{NOTES_PATH}/{zotero_collection_path}/{MethodName}.md`
+- Zotero 输入：`{NOTES_PATH}/{zotero_collection_path}/{MethodName}.md`
+- 非 Zotero 输入：根据主题分类，无法判断时写入 `{NOTES_PATH}/_inbox/`
 - 不确定分类 → `_inbox/`
-- YAML frontmatter：title / method_name / authors / year / venue / tags / zotero_collection / image_source / created
+- YAML frontmatter：title / method_name / authors / year / venue / tags / 可选 zotero_collection / image_source / created
 
 ### 概念库维护
 
@@ -189,8 +193,8 @@ python3 paper_daemon.py --status     # 查看进度
 python3 paper_daemon.py --list       # 列出所有分类
 ```
 
-- API 限流：指数退避（60s → 最大 12h）
-- 配额监控：每 3 篇检查一次，> 85% 自动等待
+- API 限流：指数退避（60s → 最大 6h）
+- 配额限制：优先解析 Codex 返回的重置时间；无法解析时默认等待 30 分钟
 - 断点续跑：checkpoint 持久化
 - 进程锁：防止并发
 - 自动跳过已有笔记（> 100 行）
@@ -209,7 +213,7 @@ python3 paper_daemon.py --list       # 列出所有分类
 - 用 wikilink 格式
 
 分两个入口：
-- `generate_concept_mocs.py`：扫描概念库（`_概念/`）
+- `generate_concept_mocs.py`：扫描配置中的概念库目录（默认 `_concepts/`）
 - `generate_paper_mocs.py`：扫描论文笔记（排除概念目录）
 
 ---
@@ -223,10 +227,10 @@ python3 paper_daemon.py --list       # 列出所有分类
 ```json
 {
   "paths": {
-    "obsidian_vault": "~/ObsidianVault",
-    "paper_notes_folder": "论文笔记",
+    "obsidian_vault": ".",
+    "paper_notes_folder": "PaperNotes",
     "daily_papers_folder": "DailyPapers",
-    "concepts_folder": "_概念",
+    "concepts_folder": "_concepts",
     "zotero_db": "~/Zotero/zotero.sqlite",
     "zotero_storage": "~/Zotero/storage"
   },
@@ -234,9 +238,12 @@ python3 paper_daemon.py --list       # 列出所有分类
     "keywords": ["world model", "diffusion model", "embodied ai", ...],
     "negative_keywords": ["medical imaging", "weather forecast", ...],
     "domain_boost_keywords": ["robot", "manipulation", ...],
-    "arxiv_categories": ["cs.RO", "cs.CV", "cs.AI", "cs.LG"],
+    "arxiv_categories": ["cs.RO", "cs.CV", "cs.AI", "cs.GR"],
     "min_score": 2,
     "top_n": 30
+  },
+  "runtime": {
+    "timezone": "Asia/Shanghai"
   },
   "automation": {
     "auto_refresh_indexes": true,
@@ -259,18 +266,18 @@ MOC 生成引擎，被 `generate_concept_mocs.py` 和 `generate_paper_mocs.py` �
 ## Obsidian 目录结构
 
 ```
-~/ObsidianVault/
+<Obsidian Vault>/
 ├── DailyPapers/
 │   ├── YYYY-MM-DD-论文推荐.md      # 每日推荐
 │   └── .history.json                # 跨天去重索引
-├── 论文笔记/
+├── PaperNotes/
 │   ├── 3-Robotics/
 │   │   ├── 1-VLX/VLA/
 │   │   │   ├── VLA.md               # 目录页（自动生成）
 │   │   │   ├── OpenVLA.md
 │   │   │   └── Pi05.md
 │   │   └── ...
-│   ├── _概念/
+│   ├── _concepts/
 │   │   ├── 1-生成模型/
 │   │   │   ├── DiT.md
 │   │   │   └── Flow Matching.md
