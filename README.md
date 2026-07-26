@@ -29,6 +29,37 @@ Codex 仍支持 `$daily-papers`、`$paper-reader`、`$generate-mocs` 作为显�
 但它们不是用户侧的必要输入。完整的跨 harness 契约见
 [HARNESS_CONTRACT.md](HARNESS_CONTRACT.md)。
 
+## Claude Code / Codex 相同点与不同点
+
+相同的用户可见接口：
+
+| 项目 | Claude Code `main` | 当前 Codex 分支 |
+| --- | --- | --- |
+| 每日调用 | `今日论文推荐` | `今日论文推荐` |
+| 多日调用 | `过去3天论文推荐` / `过去一周论文推荐` | 相同 |
+| 单篇输入 | arXiv URL、本地 PDF、显式 Zotero 输入 | 相同 |
+| 推荐文件 | `DailyPapers/YYYY-MM-DD-论文推荐.md` | 相同 |
+| 论文笔记 | `论文笔记/<分类>/<MethodName>.md` | 相同 |
+| 概念与待整理目录 | `_概念/`、`_待整理/` | 相同 |
+| 默认研究配置 | embodied AI、world model、diffusion model | 相同 |
+| Markdown 模板 | 推荐页、论文笔记、wikilink、MOC | 相同 |
+
+当前仍存在的 adapter / 运行差异：
+
+| 项目 | Claude Code `main` | 当前 Codex 分支 |
+| --- | --- | --- |
+| Skill 安装 | `~/.claude/skills` | 项目级 `.agents/skills` 或用户级 `~/.agents/skills` |
+| 显式调用 | `/daily-papers` | `$daily-papers` |
+| Skill 元数据 | frontmatter 的 `context`、`allowed-tools` | `agents/openai.yaml` |
+| Vault 默认根目录 | `~/ObsidianVault` | 当前 Git 仓库根目录 `"."` |
+| 中间数据 | 固定临时 JSON | `.dailypaper/runs/<run-id>/` 隔离 manifest |
+| 日报 Git 行为 | review/notes 阶段可分别提交，notes 使用 `git add -A` | 全部验证后精确暂存，最多一次提交 |
+| 非 Zotero 单篇输入 | 说明仍偏向 Zotero 分类路径 | 明确不访问 Zotero，无法分类时写 `_待整理/` |
+
+因此混用时，应让两个 harness 指向同一个 Vault 和同一份业务配置，并统一使用自然语言
+入口。不要同时运行两个 agent 修改同一天的推荐页。上表后三项是 `main` 尚未同步的
+实现差异，不属于期望长期保留的用户接口。
+
 ## 输出
 
 默认目录结构：

@@ -165,6 +165,7 @@ description: |
 
 分流表规则：
 - 论文名用 `[[wikilink]]`，Obsidian 中可直接跳转到笔记
+- **wikilink 必须使用论文的方法名/模型名缩写**（如 `[[DAPL]]`、`[[NE-Dreamer]]`），不要用完整论文标题（如 ~~`[[Emerging Extrinsic Dexterity in Cluttered Scenes]]`~~）。方法名通常是标题冒号前的缩写，或 `method_names` 列表中排第一的名称。这样后续 paper-reader 生成笔记时文件名能自动匹配
 - 每篇论文后括号内一句话说明理由
 - 同等级论文用 `·` 分隔，写在同一行
 

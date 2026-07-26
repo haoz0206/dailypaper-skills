@@ -90,3 +90,10 @@ Git automation has the same observable result on both harnesses:
 Changes to default research keywords, output directories, note templates,
 scoring rules, or generated Markdown require a shared workflow change and
 should be applied to both branches.
+
+## Current implementation status
+
+The Codex adapter implements isolated run manifests and a single exact-path
+publication step. The Claude Code `main` branch still uses fixed temporary JSON
+paths and may commit in both review and notes stages. These are documented
+compatibility gaps, not intended differences in the stable interface.
