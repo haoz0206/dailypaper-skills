@@ -15,6 +15,8 @@ The script:
 4. Updates the "分流表" section to use the correct wikilink names
 """
 
+from __future__ import annotations
+
 import argparse
 import re
 import sys
@@ -24,29 +26,33 @@ _SHARED_DIR = Path(__file__).resolve().parent.parent / "_shared"
 if str(_SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(_SHARED_DIR))
 
-from user_config import obsidian_vault_path, paper_notes_dir
-
-NOTES_DIR = paper_notes_dir()
+from user_config import concepts_dir, obsidian_vault_path, paper_notes_dir
 
 
-def scan_notes() -> dict:
+def scan_notes(
+    notes_dir: Path | None = None,
+    concepts_path: Path | None = None,
+) -> dict:
     """Scan notes directory and build index of {method_name: note_path}."""
     notes_index = {}
+    notes_dir = (notes_dir or paper_notes_dir()).resolve()
+    concepts_path = (concepts_path or concepts_dir()).resolve()
 
-    if not NOTES_DIR.exists():
+    if not notes_dir.exists():
         return notes_index
 
-    # Scan all subdirectories (exclude _concept folder)
-    for md_file in NOTES_DIR.rglob('*.md'):
+    # Scan all subdirectories except the configured concepts tree.
+    for md_file in notes_dir.rglob('*.md'):
         # Skip concept notes
-        if '_概念' in str(md_file):
+        resolved_file = md_file.resolve()
+        if resolved_file.parent == concepts_path or concepts_path in resolved_file.parents:
             continue
 
         # Use filename (without .md) as method name
         method_name = md_file.stem
         notes_index[method_name.lower()] = {
             'name': method_name,
-            'path': md_file.relative_to(NOTES_DIR.parent),
+            'path': md_file.relative_to(notes_dir.parent),
         }
 
     return notes_index
@@ -185,7 +191,7 @@ def update_diversion_table(recommendation_path: Path, notes_index: dict, matches
 def main():
     parser = argparse.ArgumentParser(description='Backfill paper note links')
     parser.add_argument('--recommendation', required=True, help='Path to recommendation file')
-    parser.add_argument('--notes-dir', help='Path to notes directory (default: from config)')
+    parser.add_argument('--notes-dir', type=Path, help='Path to notes directory (default: from config)')
 
     args = parser.parse_args()
 
@@ -194,8 +200,12 @@ def main():
         print(f"Error: Recommendation file not found: {recommendation_path}", file=sys.stderr)
         sys.exit(1)
 
+    notes_dir = args.notes_dir
+    if notes_dir and not notes_dir.is_absolute():
+        notes_dir = obsidian_vault_path() / notes_dir
+
     # Scan notes
-    notes_index = scan_notes()
+    notes_index = scan_notes(notes_dir=notes_dir)
     print(f"Found {len(notes_index)} paper notes")
 
     # Backfill links

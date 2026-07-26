@@ -2,7 +2,7 @@
 name: daily-papers-fetch
 description: |
   论文抓取（3 步流水线的第 1 步）。抓取 arXiv + HuggingFace 最新论文，打分筛选，富化信息，
-  输出到 /tmp/daily_papers_enriched.json 供后续 skill 使用。
+  输出到本次运行 manifest 指定的隔离目录，供后续阶段使用。
 
   触发词："论文抓取"、"跑一下论文抓取"
   支持多天模式："过去3天论文推荐"、"过去一周论文推荐"、"过去一周的论文"、"抓 3 天的论文"、"最近5天"
@@ -16,7 +16,9 @@ description: |
 
 ## Step 0: 读取共享配置
 
-先读取 `../_shared/user-config.json`，如果 `../_shared/user-config.local.json` 存在，再用它覆盖默认值。
+将本 `SKILL.md` 所在目录的父目录解析为绝对路径 `SKILLS_ROOT`。先读取
+`{SKILLS_ROOT}/_shared/user-config.json`；如果同目录的 `user-config.local.json`
+存在，再用它覆盖默认值。也允许 `DAILYPAPER_CONFIG` 指向外部配置。
 
 显式生成并在后续统一使用这些变量：
 
@@ -28,13 +30,45 @@ description: |
 - `ARXIV_CATEGORIES`
 - `MIN_SCORE`
 - `TOP_N`
+- `TIMEZONE`
+- `RUN_MANIFEST`
+- `CANDIDATES_OUTPUT`
+- `ENRICHED_OUTPUT`
 
 其中：
 
 - `DAILY_PAPERS_PATH = {VAULT_PATH}/{daily_papers_folder}`
+- `TIMEZONE = runtime.timezone`
 - 所有关键词、分类、阈值都以共享配置为准
+- `CANDIDATES_OUTPUT` 和 `ENRICHED_OUTPUT` 必须从 `RUN_MANIFEST.paths` 读取
+
+如果父流程没有提供 `RUN_MANIFEST`，先运行：
+
+```bash
+python3 "{SKILLS_ROOT}/_shared/run_context.py" create \
+  --date YYYY-MM-DD --timezone "{TIMEZONE}"
+```
+
+记住返回的 manifest 绝对路径；禁止复用其他运行的 manifest。
+
+随后必须取得 Vault 任务所有权：
+
+```bash
+python3 "{SKILLS_ROOT}/_shared/vault_coordination.py" acquire \
+  "{RUN_MANIFEST}" --harness claude-code
+```
+
+如果父流程已经提供 manifest，则确认 `RUN_MANIFEST.coordination.status` 是
+`acquired`。任何其他状态都停止；内部阶段不得绕过协调器直接写 Vault。
 
 后续统一以共享配置和上面的变量为准。
+
+开始抓取前更新运行状态：
+
+```bash
+python3 "{SKILLS_ROOT}/_shared/run_context.py" update "{RUN_MANIFEST}" \
+  --status fetching
+```
 
 ## 解析天数
 
@@ -48,8 +82,8 @@ description: |
 
 ## 配置来源
 
-- 默认配置在 `../_shared/user-config.json`
-- 个人覆盖配置放在 `../_shared/user-config.local.json`
+- 默认配置在 `{SKILLS_ROOT}/_shared/user-config.json`
+- 个人覆盖配置放在 `{SKILLS_ROOT}/_shared/user-config.local.json`
 - 如果两者都存在，以 `local` 为准
 
 ## 工作流程
@@ -60,10 +94,12 @@ description: |
 
 ```bash
 # 默认：当天
-python3 ../daily-papers/fetch_and_score.py > /tmp/daily_papers_top30.json
+python3 "{SKILLS_ROOT}/daily-papers/fetch_and_score.py" \
+  --date YYYY-MM-DD --timezone "{TIMEZONE}" --output "{CANDIDATES_OUTPUT}"
 
 # 多天模式（将 N 替换为解析出的天数）
-python3 ../daily-papers/fetch_and_score.py --days N > /tmp/daily_papers_top30.json
+python3 "{SKILLS_ROOT}/daily-papers/fetch_and_score.py" \
+  --date YYYY-MM-DD --timezone "{TIMEZONE}" --days N --output "{CANDIDATES_OUTPUT}"
 ```
 
 根据前面解析的 `DAYS_ARG`，如果用户指定了天数就加 `--days N`，否则不加。
@@ -76,21 +112,21 @@ python3 ../daily-papers/fetch_and_score.py --days N > /tmp/daily_papers_top30.js
 - 不足 20 篇时从历史回填
 - 按 score 降序取 Top 30
 
-进度日志输出到 stderr，JSON 结果输出到 stdout。
+进度日志输出到 stderr，JSON 结果写入 manifest 指定的候选文件。
 
-**检查输出**：确认 `/tmp/daily_papers_top30.json` 存在且包含有效 JSON 数组。如果为空数组或文件不存在，检查 stderr 诊断问题。
+**检查输出**：确认 `CANDIDATES_OUTPUT` 存在且包含有效 JSON 数组。如果为空数组或文件不存在，检查 stderr 诊断问题。
 
 ### Phase 3: 批量富化（enrich_papers.py 脚本）
 
-用 `enrich_papers.py` 脚本一次性富化所有论文。脚本使用 `asyncio` + `curl` 子进程并发请求，纯 regex 解析 HTML，无需 WebFetch。
-
-**先把 Phase 2 的 Top 30 结果保存到临时文件**，然后运行：
+用 `enrich_papers.py` 脚本一次性富化所有论文。脚本使用 `asyncio` + `curl`
+子进程并发请求，纯 regex 解析 HTML，不依赖宿主专用网页工具。
 
 ```bash
-python3 ../daily-papers/enrich_papers.py /tmp/daily_papers_top30.json /tmp/daily_papers_enriched.json
+python3 "{SKILLS_ROOT}/daily-papers/enrich_papers.py" \
+  --input "{CANDIDATES_OUTPUT}" --output "{ENRICHED_OUTPUT}"
 ```
 
-注意：使用**两个文件路径参数（输入 + 输出）**，避免 sandbox 环境下 stdout/stderr 混淆。脚本会把第一个 `.json` 参数当作输入路径、第二个当作输出路径；如果只传一个 `.json` 它会被当作输入路径，结果走 stdout。
+使用显式输入输出参数，避免管道、stdout/stderr 混淆和跨运行文件冲突。
 
 脚本自动完成以下工作（Semaphore(10) 限制并发，单篇超时 30 秒）：
 - 并行抓取 HTML 页面 + PDF 页面
@@ -115,17 +151,17 @@ python3 ../daily-papers/enrich_papers.py /tmp/daily_papers_top30.json /tmp/daily
 
 ## 输出
 
-完成后检查 `/tmp/daily_papers_enriched.json` 存在且包含有效 JSON 数组。告知用户：
+完成后检查 `ENRICHED_OUTPUT` 存在且包含有效 JSON 数组。告知用户：
 - 抓取了多少篇论文
 - 富化成功多少篇
 - 提示运行下一步：`跑一下论文点评`
 
 ## 注意事项
 
-- Phase 1+2 使用 `fetch_and_score.py` 脚本，**不启动 Task Agent**，零 token 消耗
-- Phase 3 使用 `enrich_papers.py` 脚本，同样不启动 Task Agent
+- Phase 1+2 使用 `fetch_and_score.py` 脚本，由当前 Claude Code 会话直接执行，零 token 消耗
+- Phase 3 使用 `enrich_papers.py` 脚本，同样由当前 Claude Code 会话直接执行
 - 如果脚本执行失败，检查 stderr 输出诊断问题
 - 如果 arXiv API 抓取失败，脚本自动 fallback 到仅 HuggingFace 源
 - 如果总论文数不足 20 篇，有多少处理多少
 - **周末策略**：arXiv 周末不更新，HF daily 周末基本为空，但 HF trending 持续更新。周末主要依赖 trending 来源
-- **不做 git 操作**，不生成推荐文件，只输出临时 JSON
+- **不做 git 操作**，不生成推荐文件，只输出本次运行的中间 JSON

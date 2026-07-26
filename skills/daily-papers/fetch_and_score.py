@@ -2,12 +2,12 @@
 """
 fetch_and_score.py — Phase 1+2: Fetch, score, merge, dedup, select top 30.
 
-Replaces the two LLM Task Agents with pure Python. Zero token cost.
+Replaces the LLM orchestration step with pure Python. Zero token cost.
 
 Usage:
-    python3 fetch_and_score.py > /tmp/daily_papers_top30.json
-    python3 fetch_and_score.py --date 2026-02-25 > /tmp/daily_papers_top30.json
-    python3 fetch_and_score.py --days 7 > /tmp/daily_papers_top30.json
+    python3 fetch_and_score.py --output /path/to/candidates.json
+    python3 fetch_and_score.py --date 2026-02-25 --output /path/to/candidates.json
+    python3 fetch_and_score.py --days 7 --output /path/to/candidates.json
 
 Stderr: progress logs.  Stdout: JSON array of top papers (30 * days).
 """
@@ -22,12 +22,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 _SHARED_DIR = Path(__file__).resolve().parent.parent / "_shared"
 if str(_SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(_SHARED_DIR))
 
-from user_config import daily_papers_config, daily_papers_dir
+from user_config import daily_papers_config, daily_papers_dir, timezone_name
 
 # ── Configuration ──────────────────────────────────────────────────────────
 
@@ -436,17 +437,21 @@ def merge_and_dedup(
 # ── Main ───────────────────────────────────────────────────────────────────
 
 
+def resolve_target_date(date_value: str | None, timezone: str):
+    if date_value:
+        return datetime.strptime(date_value, "%Y-%m-%d").date()
+    return datetime.now(ZoneInfo(timezone)).date()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", help="Target date YYYY-MM-DD (default: today)")
     parser.add_argument("--days", type=int, default=1, help="Number of days to fetch (default: 1)")
+    parser.add_argument("--timezone", default=timezone_name(), help="IANA timezone for the default date")
+    parser.add_argument("--output", type=Path, help="Write JSON to this file instead of stdout")
     args = parser.parse_args()
 
-    target_date = (
-        datetime.strptime(args.date, "%Y-%m-%d").date()
-        if args.date
-        else datetime.now().date()
-    )
+    target_date = resolve_target_date(args.date, args.timezone)
     days = max(1, args.days)
     start_date = target_date - timedelta(days=days - 1)
     top_n = TOP_N * days
@@ -462,11 +467,14 @@ def main():
     arxiv_papers = fetch_arxiv_papers(start_date, target_date, days)
     top = merge_and_dedup(hf_papers, arxiv_papers, target_date, days=days, top_n=top_n)
 
-    # Output to stdout (UTF-8 encoded for Windows compatibility)
-    import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    json.dump(top, sys.stdout, ensure_ascii=False, indent=2)
-    print(file=sys.stdout)  # trailing newline
+    output = json.dumps(top, ensure_ascii=False, indent=2) + "\n"
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(output, encoding="utf-8")
+    else:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stdout.write(output)
 
 
 if __name__ == "__main__":

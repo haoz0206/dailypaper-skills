@@ -120,7 +120,8 @@ Claude 以"毒舌但有料的资深研究员"角色点评每篇论文：
 ### 3.4 刷新目录页 + git
 
 - 调用 `generate_concept_mocs.py` 和 `generate_paper_mocs.py`
-- 可选：git commit & push
+- 全部验证成功后，由 `vault_coordination.py` 创建一次精确暂存的内容 commit/push
+- acquisition commit 在抓取开始前已经取得跨机器任务所有权
 
 ---
 
@@ -223,10 +224,11 @@ python3 paper_daemon.py --list       # 列出所有分类
 ```json
 {
   "paths": {
-    "obsidian_vault": "~/ObsidianVault",
+    "obsidian_vault": ".",
     "paper_notes_folder": "论文笔记",
     "daily_papers_folder": "DailyPapers",
     "concepts_folder": "_概念",
+    "inbox_folder": "_待整理",
     "zotero_db": "~/Zotero/zotero.sqlite",
     "zotero_storage": "~/Zotero/storage"
   },
@@ -237,6 +239,20 @@ python3 paper_daemon.py --list       # 列出所有分类
     "arxiv_categories": ["cs.RO", "cs.CV", "cs.AI", "cs.LG"],
     "min_score": 2,
     "top_n": 30
+  },
+  "runtime": {
+    "timezone": "Asia/Shanghai"
+  },
+  "repository": {
+    "url": "git@github.com:haoz0206/dailypaper-vault.git",
+    "remote": "origin",
+    "branch": "main",
+    "task_state_file": ".dailypaper/tasks/daily-papers.json",
+    "pull_before_run": true,
+    "require_clean": true,
+    "coordination_enabled": true,
+    "lease_hours": 24,
+    "same_day_policy": "skip"
   },
   "automation": {
     "auto_refresh_indexes": true,
@@ -250,6 +266,18 @@ python3 paper_daemon.py --list       # 列出所有分类
 
 Python 配置加载器，带缓存。提供 `load_user_config()` / `paths_config()` / `daily_papers_config()` / `automation_config()` 等便捷函数。会校验 `git_push` 不能在 `git_commit` 关闭时开启。
 
+### run_context.py
+
+为每次运行创建隔离 manifest，记录日期、时区、中间文件、Vault 相对变更路径和远程
+协调结果。Claude Code 与 Codex 传递同一种 manifest。
+
+### vault_coordination.py
+
+每日任务的确定性 Git 协调器。运行前验证固定远程和分支、执行 fast-forward pull，
+并通过 `.dailypaper/tasks/daily-papers.json` 的 acquisition commit/push 原子抢占
+任务。运行后验证远程 HEAD、`run_id` 和配置指纹，只发布 manifest 登记的稳定输出。
+协调失败时禁止自动 rebase、force push 或锁抢占。
+
 ### moc_builder.py
 
 MOC 生成引擎，被 `generate_concept_mocs.py` 和 `generate_paper_mocs.py` 调用。
@@ -259,7 +287,11 @@ MOC 生成引擎，被 `generate_concept_mocs.py` 和 `generate_paper_mocs.py` �
 ## Obsidian 目录结构
 
 ```
-~/ObsidianVault/
+<Obsidian Vault>/
+├── .dailypaper/
+│   ├── tasks/
+│   │   └── daily-papers.json        # 跨机器/跨 harness 任务状态
+│   └── runs/                        # 本地忽略的中间 manifest
 ├── DailyPapers/
 │   ├── YYYY-MM-DD-论文推荐.md      # 每日推荐
 │   └── .history.json                # 跨天去重索引

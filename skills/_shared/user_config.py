@@ -1,38 +1,37 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
 import copy
 import json
 import os
-import sys
 from functools import lru_cache
 from pathlib import Path
 
 
-def get_temp_dir() -> Path:
-    """Get platform-appropriate temp directory for daily papers data.
-
-    On Windows: ~/tmp/ (e.g., C:/Users/username/tmp/)
-    On Linux/Mac: /tmp/
-    """
-    if sys.platform == 'win32':
-        # Windows: use user's home directory under ~/tmp
-        tmp_dir = Path.home() / 'tmp'
-    else:
-        # Linux/Mac: use /tmp
-        tmp_dir = Path('/tmp')
-
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    return tmp_dir
-
-
 DEFAULT_CONFIG = {
     "paths": {
-        "obsidian_vault": "~/ObsidianVault",
+        "obsidian_vault": ".",
         "paper_notes_folder": "论文笔记",
         "daily_papers_folder": "DailyPapers",
         "concepts_folder": "_概念",
+        "inbox_folder": "_待整理",
         "zotero_db": "~/Zotero/zotero.sqlite",
         "zotero_storage": "~/Zotero/storage",
+    },
+    "runtime": {
+        "timezone": "Asia/Shanghai",
+    },
+    "repository": {
+        "url": "git@github.com:haoz0206/dailypaper-vault.git",
+        "remote": "origin",
+        "branch": "main",
+        "task_state_file": ".dailypaper/tasks/daily-papers.json",
+        "pull_before_run": True,
+        "require_clean": True,
+        "coordination_enabled": True,
+        "lease_hours": 24,
+        "same_day_policy": "skip",
     },
     "daily_papers": {
         "keywords": [
@@ -132,11 +131,34 @@ def load_user_config() -> dict:
         if isinstance(loaded, dict):
             _deep_merge(config, loaded)
 
+    external_config = os.environ.get("DAILYPAPER_CONFIG")
+    if external_config:
+        config_path = Path(external_config).expanduser().resolve()
+        with config_path.open("r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            _deep_merge(config, loaded)
+
     return config
 
 
-def _expand(path_value: str) -> Path:
-    return Path(path_value).expanduser()
+def _find_workspace_root() -> Path:
+    explicit_root = os.environ.get("DAILYPAPER_WORKSPACE")
+    if explicit_root:
+        return Path(explicit_root).expanduser().resolve()
+
+    current = Path.cwd().resolve()
+    for candidate in (current, *current.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return current
+
+
+def _expand(path_value: str, *, relative_to: Path | None = None) -> Path:
+    expanded = Path(path_value).expanduser()
+    if expanded.is_absolute():
+        return expanded.resolve()
+    return ((relative_to or _find_workspace_root()) / expanded).resolve()
 
 
 def paths_config() -> dict:
@@ -155,7 +177,18 @@ def automation_config() -> dict:
     return config
 
 
+def repository_config() -> dict:
+    return load_user_config()["repository"]
+
+
+def runtime_config() -> dict:
+    return load_user_config()["runtime"]
+
+
 def obsidian_vault_path() -> Path:
+    explicit_vault = os.environ.get("DAILYPAPER_VAULT")
+    if explicit_vault:
+        return _expand(explicit_vault)
     return _expand(paths_config()["obsidian_vault"])
 
 
@@ -171,12 +204,25 @@ def concepts_dir() -> Path:
     return paper_notes_dir() / paths_config()["concepts_folder"]
 
 
+def paper_inbox_dir() -> Path:
+    return paper_notes_dir() / paths_config().get("inbox_folder", "_待整理")
+
+
 def zotero_db_path() -> Path:
     return _expand(paths_config()["zotero_db"])
 
 
 def zotero_storage_dir() -> Path:
     return _expand(paths_config()["zotero_storage"])
+
+
+def timezone_name() -> str:
+    return str(runtime_config().get("timezone", "Asia/Shanghai"))
+
+
+def clear_config_cache() -> None:
+    """Clear cached configuration after tests or environment changes."""
+    load_user_config.cache_clear()
 
 
 def auto_refresh_indexes_enabled() -> bool:
@@ -189,24 +235,3 @@ def git_commit_enabled() -> bool:
 
 def git_push_enabled() -> bool:
     return bool(automation_config()["git_push"])
-
-
-# ── Temp directory for intermediate data (Windows/Linux compatible) ──────────
-
-def temp_dir() -> Path:
-    """Get platform-appropriate temp directory.
-
-    Windows: ~/tmp/
-    Linux/Mac: /tmp/
-    """
-    return get_temp_dir()
-
-
-def temp_file_path(filename: str) -> Path:
-    """Get full path for a temp file.
-
-    Usage:
-        top30_path = temp_file_path('daily_papers_top30.json')
-        enriched_path = temp_file_path('daily_papers_enriched.json')
-    """
-    return temp_dir() / filename

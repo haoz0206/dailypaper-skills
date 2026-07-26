@@ -6,19 +6,18 @@ This script is part of daily-papers-review (Phase 6).
 
 Usage:
     python3 update_history.py --arxiv-ids ID1 ID2 ... --date YYYY-MM-DD
-    python3 update_history.py --from-enriched /tmp/daily_papers_enriched.json --date YYYY-MM-DD
+    python3 update_history.py --from-enriched /run/enriched.json --date YYYY-MM-DD
     python3 update_history.py --from-recommendation YYYY-MM-DD-论文推荐.md --date YYYY-MM-DD
 
-    # Cross-platform (auto-detect paths)
-    python3 update_history.py --date 2026-03-17
-
 The script:
-1. Reads existing history from {vault}/DailyPapers/.history.json
+1. Reads existing history from the configured daily-papers directory
 2. Adds new entries for papers not already in history
 3. Preserves the earliest date for papers that are re-recommended
 4. Removes entries older than 30 days
 5. Writes back to .history.json
 """
+
+from __future__ import annotations
 
 import argparse
 import json
@@ -31,27 +30,32 @@ _SHARED_DIR = Path(__file__).resolve().parent.parent / "_shared"
 if str(_SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(_SHARED_DIR))
 
-from user_config import obsidian_vault_path, temp_file_path
+from user_config import daily_papers_dir
 
-HISTORY_FILE = obsidian_vault_path() / "DailyPapers" / ".history.json"
 DAYS_TO_KEEP = 30
 
 
-def load_history() -> list:
+def history_file_path() -> Path:
+    return daily_papers_dir() / ".history.json"
+
+
+def load_history(history_file: Path | None = None) -> list:
     """Load existing history or return empty list."""
-    if not HISTORY_FILE.exists():
+    history_file = history_file or history_file_path()
+    if not history_file.exists():
         return []
     try:
-        with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+        with open(history_file, 'r', encoding='utf-8') as f:
             return json.load(f)
     except (json.JSONDecodeError, FileNotFoundError):
         return []
 
 
-def save_history(history: list):
+def save_history(history: list, history_file: Path | None = None):
     """Save history to file."""
-    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+    history_file = history_file or history_file_path()
+    history_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(history_file, 'w', encoding='utf-8') as f:
         json.dump(history, f, ensure_ascii=False, indent=2)
 
 
@@ -107,9 +111,14 @@ def load_from_recommendation(path: str) -> list:
     return entries
 
 
-def update_history(entries: list, date: str, preserve_earliest: bool = True):
+def update_history(
+    entries: list,
+    date: str,
+    preserve_earliest: bool = True,
+    history_file: Path | None = None,
+):
     """Update history with new entries."""
-    history = load_history()
+    history = load_history(history_file)
 
     # Build index of existing IDs
     existing_ids = {h.get('id') for h in history if h.get('id')}
@@ -141,7 +150,7 @@ def update_history(entries: list, date: str, preserve_earliest: bool = True):
     cutoff_date = (datetime.strptime(date, '%Y-%m-%d') - timedelta(days=DAYS_TO_KEEP)).strftime('%Y-%m-%d')
     history = [h for h in history if h.get('date', '') >= cutoff_date]
 
-    save_history(history)
+    save_history(history, history_file)
     return added
 
 
@@ -151,6 +160,7 @@ def main():
     parser.add_argument('--from-enriched', help='Path to enriched JSON file')
     parser.add_argument('--from-recommendation', help='Path to recommendation markdown file')
     parser.add_argument('--date', required=True, help='Date (YYYY-MM-DD)')
+    parser.add_argument('--history-file', type=Path, help='Override history output path')
 
     args = parser.parse_args()
 
@@ -163,17 +173,13 @@ def main():
     elif args.from_recommendation:
         entries = load_from_recommendation(args.from_recommendation)
     else:
-        # Auto-detect: try to load from default temp path
-        auto_enriched = temp_file_path('daily_papers_enriched.json')
-        if auto_enriched.exists():
-            print(f"[update_history] Auto-detected input: {auto_enriched}", file=sys.stderr)
-            entries = load_from_enriched(str(auto_enriched))
-        else:
-            print("Error: Must specify --arxiv-ids, --from-enriched, or --from-recommendation", file=sys.stderr)
-            print(f"  Or ensure {temp_file_path('daily_papers_enriched.json')} exists", file=sys.stderr)
-            sys.exit(1)
+        print(
+            "Error: Must specify --arxiv-ids, --from-enriched, or --from-recommendation",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
-    added = update_history(entries, args.date)
+    added = update_history(entries, args.date, history_file=args.history_file)
     print(f"Added {added} new entries to history")
 
 

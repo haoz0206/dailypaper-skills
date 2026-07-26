@@ -45,14 +45,14 @@
 | Skill 安装 | `~/.claude/skills` | 项目级 `.agents/skills` 或用户级 `~/.agents/skills` |
 | 显式调用 | `/daily-papers` | `$daily-papers` |
 | Skill 元数据 | frontmatter 的 `context`、`allowed-tools` | `agents/openai.yaml` |
-| Vault 默认根目录 | `~/ObsidianVault` | 当前 Git 仓库根目录 `"."` |
-| 中间数据 | 固定 `/tmp/daily_papers_*.json` | `.dailypaper/runs/<run-id>/` 隔离 manifest |
-| 日报 Git 行为 | review/notes 可分别提交，notes 使用 `git add -A` | 全部验证后精确暂存，最多一次提交 |
-| 非 Zotero 单篇输入 | 处理说明仍偏向 Zotero 分类路径 | 明确不访问 Zotero，无法分类时写 `_待整理/` |
+| Vault 默认根目录 | 当前 Git 仓库根目录 `"."` | 相同 |
+| 中间数据 | `.dailypaper/runs/<run-id>/` 隔离 manifest | 相同 |
+| 日报 Git 行为 | acquisition commit + 一个精确内容 commit | 相同 |
+| 非 Zotero 单篇输入 | 不访问 Zotero，无法分类时写 `_待整理/` | 相同 |
 
-混用时应让两个 harness 指向同一个 Vault 和同一份业务配置，并统一使用上表中的自然
-语言入口。不要同时运行两个 agent 修改同一天的推荐页。中间数据、Git 发布和非 Zotero
-行为是 `main` 尚待同步的兼容性差异，不是期望长期保留的用户接口。
+两个 harness 都会验证固定 Vault 远程，并通过任务状态文档原子取得同日写入权。应
+统一使用自然语言入口；显式调用、安装路径和元数据仍属于 adapter 差异。完整契约见
+[HARNESS_CONTRACT.md](HARNESS_CONTRACT.md)。
 
 ## ✨ 它会帮你做什么
 
@@ -67,6 +67,11 @@
 
 ```text
 ObsidianVault/
+├── .dailypaper/
+│   ├── config.json
+│   ├── tasks/
+│   │   └── daily-papers.json
+│   └── runs/
 ├── DailyPapers/
 │   └── YYYY-MM-DD-论文推荐.md
 ├── 论文笔记/
@@ -117,7 +122,7 @@ ObsidianVault/
 
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
 - [Obsidian](https://obsidian.md/)
-- [Python 3.8+](https://www.python.org/)
+- [Python 3.10+](https://www.python.org/)
 - [`poppler-utils`](https://poppler.freedesktop.org/)，macOS 可以 `brew install poppler`
 - [Zotero](https://www.zotero.org/)，可选，但如果你已经用 Zotero 管论文会很方便
 
@@ -131,14 +136,17 @@ mkdir -p ~/.claude/skills
 cp -r ./skills/* ~/.claude/skills/
 ```
 
-再准备一下 Obsidian 目录。把下面的 `VAULT` 改成你自己的库路径：
+克隆固定的远程 Vault，并准备目录：
 
 ```bash
-VAULT=~/ObsidianVault
+git clone git@github.com:haoz0206/dailypaper-vault.git ~/dailypaper-vault
+VAULT=~/dailypaper-vault
 
 mkdir -p "$VAULT/DailyPapers" \
   "$VAULT/论文笔记/_概念/0-待分类" \
   "$VAULT/论文笔记/_待整理"
+
+export DAILYPAPER_VAULT="$VAULT"
 ```
 
 我自己在本地日常用的时候，通常会这样启动 Claude Code：
@@ -151,10 +159,16 @@ claude --dangerously-skip-permissions
 
 ## 配置
 
-配置文件在：
+默认配置文件在：
 
 ```text
 ~/.claude/skills/_shared/user-config.json
+```
+
+推荐把共享配置提交到 Vault 的 `.dailypaper/config.json`，并在定时环境中设置：
+
+```bash
+export DAILYPAPER_CONFIG="$DAILYPAPER_VAULT/.dailypaper/config.json"
 ```
 
 你可以自己改，也可以直接让 Claude 帮你改，比如：
@@ -173,6 +187,9 @@ claude --dangerously-skip-permissions
 | `daily_papers.keywords` | 你关心的研究方向，用来给论文加分 |
 | `daily_papers.negative_keywords` | 你不想看的方向 |
 | `daily_papers.domain_boost_keywords` | 额外加分的领域词 |
+| `runtime.timezone` | 固定使用 `Asia/Shanghai` 判断日报日期 |
+| `repository.url` | 固定 Vault 远程仓库 |
+| `repository.task_state_file` | 跨机器/跨 harness 任务状态文档 |
 
 Zotero 分类批量阅读不需要你另外写映射文件。只要 `paths.zotero_db` 和 `paths.zotero_storage` 配好，脚本会直接从 Zotero 分类树里查。
 
@@ -223,17 +240,22 @@ Zotero AI Sidebar 更适合在读 PDF 的时候用：
 
 更多实现细节见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
-## 🔒 默认不会动你的 git
+## 🔒 Vault 远程协调
 
-默认配置比较保守：
+完整日报运行前会：
 
-- 自动刷新 Obsidian 目录页：开。
-- 自动 git commit：关。
-- 自动 git push：关。
+1. 验证 Vault 的 `origin` 是
+   `git@github.com:haoz0206/dailypaper-vault.git`，当前分支是 `main`。
+2. 要求工作树干净并执行 `git pull --ff-only origin main`。
+3. 检查当天输出和 `.dailypaper/tasks/daily-papers.json`。
+4. 用独立 acquisition commit/push 原子取得任务所有权。
 
-也就是说，它会生成和更新 Markdown，但不会默认提交或推送你的 Obsidian 仓库。
+只有抢锁 push 成功的 harness 才会继续。另一个 Claude Code/Codex 任务如果同时启动，
+普通 push 会被拒绝并立即停止，不会 rebase、force push 或覆盖同日内容。
 
-如果你的 Obsidian 库已经用 git 管理，并且想让流程结束后自动提交，可以自己打开配置。笔记多了以后，有个版本历史还是很安心的。
+全部输出验证成功后，协调器只暂存 manifest 登记的路径以及任务状态文档，创建一个
+内容 commit 并 push。`automation.git_commit` / `git_push` 仍默认关闭，它们只控制
+独立调用 `paper-reader` 或 `generate-mocs` 时的 Git 行为，不控制完整日报协调协议。
 
 ## 仓库里有什么
 

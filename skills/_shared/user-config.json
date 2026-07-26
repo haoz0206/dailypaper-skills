@@ -1,11 +1,26 @@
 {
   "paths": {
-    "obsidian_vault": "~/ObsidianVault",
+    "obsidian_vault": ".",
     "paper_notes_folder": "论文笔记",
     "daily_papers_folder": "DailyPapers",
     "concepts_folder": "_概念",
+    "inbox_folder": "_待整理",
     "zotero_db": "~/Zotero/zotero.sqlite",
     "zotero_storage": "~/Zotero/storage"
+  },
+  "runtime": {
+    "timezone": "Asia/Shanghai"
+  },
+  "repository": {
+    "url": "git@github.com:haoz0206/dailypaper-vault.git",
+    "remote": "origin",
+    "branch": "main",
+    "task_state_file": ".dailypaper/tasks/daily-papers.json",
+    "pull_before_run": true,
+    "require_clean": true,
+    "coordination_enabled": true,
+    "lease_hours": 24,
+    "same_day_policy": "skip"
   },
   "daily_papers": {
     "keywords": [

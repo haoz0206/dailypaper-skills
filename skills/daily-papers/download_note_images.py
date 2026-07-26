@@ -16,13 +16,12 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 _SHARED_DIR = Path(__file__).resolve().parent.parent / "_shared"
 if str(_SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(_SHARED_DIR))
-
-from user_config import temp_file_path
 
 CURL_TIMEOUT = 10
 CONCURRENCY = 5
@@ -135,30 +134,29 @@ async def try_pdf_extract(arxiv_id: str, assets_dir: Path, method_name: str,
         return None
     async with sem:
         try:
-            pdf_path = str(temp_file_path(f"arxiv_{arxiv_id}.pdf"))
-            prefix = str(assets_dir / f"{method_name}_pdf_fig")
-            # Download PDF if not cached
-            if not Path(pdf_path).exists():
+            with tempfile.TemporaryDirectory(prefix="dailypaper-pdf-") as temp_dir:
+                pdf_path = Path(temp_dir) / f"arxiv_{arxiv_id}.pdf"
+                prefix = str(assets_dir / f"{method_name}_pdf_fig")
                 proc = await asyncio.create_subprocess_exec(
                     "curl", "-sL", "--max-time", "30",
-                    "-o", pdf_path, f"https://arxiv.org/pdf/{arxiv_id}.pdf",
+                    "-o", str(pdf_path), f"https://arxiv.org/pdf/{arxiv_id}.pdf",
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
                 await asyncio.wait_for(proc.communicate(), timeout=35)
-            # Extract images with pdfimages
-            if Path(pdf_path).exists():
+                if not pdf_path.exists():
+                    return None
                 proc = await asyncio.create_subprocess_exec(
-                    "pdfimages", "-png", pdf_path, prefix,
+                    "pdfimages", "-png", str(pdf_path), prefix,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
                 await asyncio.wait_for(proc.communicate(), timeout=30)
-                # Find extracted images > 10KB
-                extracted = sorted(assets_dir.glob(f"{method_name}_pdf_fig-*.png"))
-                large = [f for f in extracted if f.stat().st_size > 10240]
-                if fig_num - 1 < len(large):
-                    return large[fig_num - 1]
+            # Find extracted images > 10KB
+            extracted = sorted(assets_dir.glob(f"{method_name}_pdf_fig-*.png"))
+            large = [f for f in extracted if f.stat().st_size > 10240]
+            if fig_num - 1 < len(large):
+                return large[fig_num - 1]
         except (asyncio.TimeoutError, Exception):
             pass
     return None

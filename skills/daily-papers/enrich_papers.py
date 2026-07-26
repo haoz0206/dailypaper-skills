@@ -2,14 +2,13 @@
 """Batch-enrich arXiv papers with metadata from HTML/abs pages.
 
 Usage:
-    # Linux/Mac
-    cat /tmp/daily_papers_top30.json | python3 enrich_papers.py > /tmp/daily_papers_enriched.json
+    python3 enrich_papers.py --input /path/to/candidates.json --output /path/to/enriched.json
 
-    # Windows (powershell cmd compatible)
+    # Backward-compatible positional form
     python3 enrich_papers.py input.json output.json
 
-    # Cross-platform (auto-detect paths)
-    python3 enrich_papers.py
+    # Stdin/stdout form
+    cat input.json | python3 enrich_papers.py
 
 Input:  JSON array via stdin or auto-detected file
 Output: JSON array via stdout or file with enriched fields added
@@ -17,23 +16,18 @@ Output: JSON array via stdout or file with enriched fields added
 Architecture:
     - asyncio + subprocess curl for concurrent HTTP requests
     - Semaphore(10) to avoid hammering arXiv
-    - Pure regex HTML parsing (no WebFetch / no external deps)
+    - Pure regex HTML parsing (no host-specific web tool / no external Python deps)
     - Per-request timeout via curl --max-time (no Python-level per-paper timeout)
 """
 from __future__ import annotations
 
 import asyncio
+import argparse
 import json
 import re
 import sys
 from collections import Counter
 from pathlib import Path
-
-_SHARED_DIR = Path(__file__).resolve().parent.parent / "_shared"
-if str(_SHARED_DIR) not in sys.path:
-    sys.path.insert(0, str(_SHARED_DIR))
-
-from user_config import temp_file_path
 
 SEMAPHORE_LIMIT = 10
 CURL_TIMEOUT = 30
@@ -483,50 +477,31 @@ async def enrich_all(papers: list[dict]) -> list[dict]:
 
 
 def main():
-    """Main entry point with cross-platform path support.
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", type=Path, help="Read candidate JSON from this file")
+    parser.add_argument("--output", type=Path, help="Write enriched JSON to this file")
+    parser.add_argument(
+        "legacy_paths",
+        nargs="*",
+        type=Path,
+        help="Deprecated positional input/output paths kept for compatibility",
+    )
+    args = parser.parse_args()
+    if len(args.legacy_paths) > 2:
+        parser.error("at most two positional paths are supported")
 
-    Usage:
-        # Linux/Mac - pipe from stdin
-        cat /tmp/daily_papers_top30.json | python3 enrich_papers.py
+    input_path = args.input or (
+        args.legacy_paths[0] if args.legacy_paths else None
+    )
+    output_path = args.output or (
+        args.legacy_paths[1] if len(args.legacy_paths) == 2 else None
+    )
 
-        # Windows - file arguments
-        python3 enrich_papers.py input.json output.json
-
-        # Cross-platform - auto-detect default paths
-        python3 enrich_papers.py
-    """
-    output_path = None
-    input_path = None
-
-    # Parse arguments: [input.json] [output.json]
-    if len(sys.argv) >= 2:
-        if sys.argv[1].endswith('.json'):
-            input_path = sys.argv[1]
-        else:
-            output_path = sys.argv[1]
-    if len(sys.argv) >= 3:
-        if sys.argv[2].endswith('.json'):
-            output_path = sys.argv[2]
-
-    # Auto-detect input path if not provided (Windows/Linux compatible)
-    if not input_path:
-        auto_input_path = temp_file_path('daily_papers_top30.json')
-        if auto_input_path.exists():
-            input_path = str(auto_input_path)
-            print(f"[enrich_papers] Auto-detected input: {input_path}", file=sys.stderr)
-
-    # Read input from file or stdin
-    if input_path:
-        try:
-            with open(input_path, 'r', encoding='utf-8', errors='replace') as f:
-                input_data = f.read()
-        except FileNotFoundError:
-            print(f"Error: Input file not found: {input_path}", file=sys.stderr)
-            _write_output("[]", output_path)
-            sys.exit(1)
-    else:
-        input_data = sys.stdin.read()
-
+    input_data = (
+        input_path.read_text(encoding="utf-8", errors="replace")
+        if input_path
+        else sys.stdin.read()
+    )
     if not input_data.strip():
         _write_output("[]", output_path)
         return
@@ -548,20 +523,17 @@ def main():
 
     output = json.dumps(enriched, ensure_ascii=False, indent=2) + "\n"
 
-    # Auto-detect output path if not provided (Windows/Linux compatible)
-    if not output_path:
-        output_path = str(temp_file_path('daily_papers_enriched.json'))
-        print(f"[enrich_papers] Auto-detected output: {output_path}", file=sys.stderr)
-
     _write_output(output, output_path)
 
 
-def _write_output(data: str, output_path: str | None):
+def _write_output(data: str, output_path: Path | None):
     """Write output to file (if path given) or stdout with explicit flush."""
     if output_path:
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(data)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(data, encoding="utf-8")
     else:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         sys.stdout.write(data)
         sys.stdout.flush()
 

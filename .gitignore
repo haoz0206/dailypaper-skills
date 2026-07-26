@@ -1,5 +1,10 @@
 # Personal Zotero collection mapping (AI auto-generated)
 skills/paper-reader/assets/collection_mapping.json
+skills/_shared/user-config.local.json
+.agents/skills/_shared/user-config.local.json
+
+# Per-run state (never commit generated intermediate artifacts)
+.dailypaper/runs/
 
 # Python cache
 __pycache__/

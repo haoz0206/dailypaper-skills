@@ -21,23 +21,29 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch
 
 ## Step 0: 读取共享配置
 
-先读取 `../_shared/user-config.json`，如果 `../_shared/user-config.local.json` 存在，再用它覆盖默认值。
+将本 `SKILL.md` 所在目录的父目录解析为绝对路径 `SKILLS_ROOT`。读取
+`{SKILLS_ROOT}/_shared/user-config.json`；如果同目录的
+`user-config.local.json` 存在，再用它覆盖默认值。也允许
+`DAILYPAPER_CONFIG` 指向外部配置。
 
 显式生成并在后续统一使用这些变量：
 
 - `VAULT_PATH`
 - `NOTES_PATH`
 - `CONCEPTS_PATH`
+- `INBOX_PATH`
 - `ZOTERO_DB`
 - `ZOTERO_STORAGE`
 - `AUTO_REFRESH_INDEXES`
 - `GIT_COMMIT_ENABLED`
 - `GIT_PUSH_ENABLED`
+- `DAILYPAPER_PARENT_RUN`（由每日流水线调用时为 true）
 
 其中：
 
 - `NOTES_PATH = {VAULT_PATH}/{paper_notes_folder}`
 - `CONCEPTS_PATH = {NOTES_PATH}/{concepts_folder}`
+- `INBOX_PATH = {NOTES_PATH}/{inbox_folder}`
 - `GIT_PUSH_ENABLED` 只有在 `GIT_COMMIT_ENABLED=true` 时才可能为真
 
 后续统一使用上面的变量。
@@ -46,21 +52,25 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch
 
 | 输入方式 | 示例 | 处理方法 |
 |----------|------|----------|
-| PDF 路径 | `/path/to/paper.pdf` | 直接 Read |
-| arXiv 链接 | `https://arxiv.org/abs/xxxx` | WebFetch |
+| PDF 路径 | `/path/to/paper.pdf` | 直接读取本地文件 |
+| arXiv 链接 | `https://arxiv.org/abs/xxxx` | 优先获取 arXiv HTML，必要时下载 PDF |
 | Zotero 分类 | "VLA 分类的论文" | 查询数据库 → 列出 → 用户选择 |
 | Zotero 搜索 | "Zotero 里的 π0.5" | 搜索标题 → 找到 PDF |
 | 无 PDF | Zotero 条目无附件 | 从网上获取（见下方） |
 
 ### 无 PDF 时的获取流程
 
-1. `python3 assets/zotero_helper.py info {item_id}` 获取论文信息
-2. 按优先级获取：arXiv HTML > arXiv PDF > DOI > WebSearch 标题
-3. 判断 arXiv ID：从 URL / Zotero extra 字段 / 标题搜索
-4. 推荐直接 WebFetch `https://arxiv.org/html/{arxiv_id}`，无需下载
+1. 只有输入明确来自 Zotero 时，才运行
+   `python3 "{SKILLS_ROOT}/paper-reader/assets/zotero_helper.py" info {item_id}`。
+2. 按优先级获取：arXiv HTML > arXiv PDF > DOI > 标题检索。
+3. 从用户 URL、Zotero extra 字段或 arXiv API 标题检索确定 arXiv ID。
+4. 优先用可用网络工具或 `curl` 获取 `https://arxiv.org/html/{arxiv_id}`。
 5. 跳过条件：既无 PDF 也无在线来源 / 非论文内容
 
-> Zotero 详细操作见 `references/zotero-guide.md`
+对 arXiv URL 或本地 PDF 输入，**不得检查或访问 Zotero SQLite**。Zotero 是显式的
+可选集成，不是 paper-reader 的前置条件。
+
+> Zotero 详细操作见 `{SKILLS_ROOT}/paper-reader/references/zotero-guide.md`
 
 ## 2. 阅读模式
 
@@ -73,7 +83,8 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch
 
 ## 3. 笔记生成
 
-**模板**: 严格遵循 `assets/paper-note-template.md`，不可自行简化。
+**模板**: 严格遵循
+`{SKILLS_ROOT}/paper-reader/assets/paper-note-template.md`，不可自行简化。
 
 ### 核心质量规则
 
@@ -83,32 +94,35 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch
 4. **公式完整性**: 每个公式必须有名称（`[[概念|名称]]`）、LaTeX 公式、含义、符号说明
 5. **图片外链优先**: arXiv HTML / 项目主页 / GitHub，找不到再本地下载
 
-> 公式/图片/表格的详细质量规范见 `references/quality-standards.md`
+> 公式/图片/表格的详细质量规范见
+> `{SKILLS_ROOT}/paper-reader/references/quality-standards.md`
 
 ### 图片获取流程（多源 fallback）
 
 **目标**: 确保笔记中包含论文的**所有 Figure**，先统计论文 Figure 总数再逐一获取。
 
-1. WebSearch `"{论文标题} arxiv"` 获取 arXiv ID
+1. 使用 arXiv API 或可用搜索能力按标题获取 arXiv ID
 2. **来源 A — arXiv HTML**（首选）：
-   - WebFetch `https://arxiv.org/html/{arxiv_id}` 提取所有 `<figure>` 的标题与 img src URL
+   - 获取 `https://arxiv.org/html/{arxiv_id}`，提取所有 `<figure>` 的标题与 img src URL
    - 统计论文 Figure 总数，确认提取数量是否完整
 3. **来源 B — 项目主页**（HTML 404 或图片不全时）：
    - 从摘要/HTML 中查找项目主页 URL（常见模式：`project page`、`github.io`、`our website`）
-   - WebFetch 项目主页，提取展示图片（通常包含 teaser / demo 图）
+   - 获取项目主页并提取展示图片（通常包含 teaser / demo 图）
 4. **来源 C — PDF 提取**（前两者都失败时）：
    - `pdfimages -png` 从 PDF 中提取，筛选 >10KB 的有效图片
 5. 笔记中用 `![Figure X](url)` 外链嵌入
 6. 验证：外链可加载 / 本地文件 >10KB
-7. **URL 去重**：写入前检查 URL 中是否有重复的 arxiv_id 路径段（如 `2603.05312v1/2603.05312v1/`），有则删除重复段。详见 `references/image-troubleshooting.md`
+7. **URL 去重**：写入前检查 URL 中是否有重复的 arxiv_id 路径段（如 `2603.05312v1/2603.05312v1/`），有则删除重复段。详见
+   `{SKILLS_ROOT}/paper-reader/references/image-troubleshooting.md`
 
-> ar5iv 编号不一定对应 Figure 编号，排错见 `references/image-troubleshooting.md`
+> ar5iv 编号不一定对应 Figure 编号，排错见
+> `{SKILLS_ROOT}/paper-reader/references/image-troubleshooting.md`
 
 ### 图片可靠性保障（生成后自动执行）
 
 笔记保存后，运行图片可达性检查脚本，自动将不可访问的外链图片下载到本地：
 ```bash
-python3 ../daily-papers/download_note_images.py "{笔记完整路径}"
+python3 "{SKILLS_ROOT}/daily-papers/download_note_images.py" "{笔记完整路径}"
 ```
 - 可达的外链保持不动，不可达的自动下载到 `assets/` 并替换为 Obsidian wikilink
 - 如有本地化操作，frontmatter `image_source` 自动更新为 `mixed`
@@ -124,11 +138,14 @@ python3 ../daily-papers/download_note_images.py "{笔记完整路径}"
 
 只用**方法名/模型名**：`{方法名}.md`（如 `Pi05.md`，不加年份前缀）。
 方法名判断：标题冒号前 / Abstract 中 "We propose XXX" / 希腊字母转 ASCII。
-不确定时保存到 `_待整理/`。
+不确定时保存到 `{INBOX_PATH}`。
 
 ### 保存路径
 
-按 Zotero 分类层级：`{NOTES_PATH}/{zotero_collection_path}/{方法名}.md`
+- Zotero 输入：优先按 `{NOTES_PATH}/{zotero_collection_path}/{方法名}.md` 保存。
+- arXiv URL 或本地 PDF：按论文主题选择现有分类；无法可靠分类时保存到
+  `{INBOX_PATH}/{方法名}.md`。
+- 所有目标路径必须位于 `NOTES_PATH` 内。
 
 ### YAML frontmatter
 
@@ -140,7 +157,7 @@ authors: [Author1, Author2]
 year: 2025
 venue: arXiv
 tags: [tag1, tag2]  # 小写连字符，3-8 个
-zotero_collection: 3-Robotics/1-VLX/VLA
+zotero_collection: ""  # 非 Zotero 输入留空
 image_source: online
 created: YYYY-MM-DD
 ---
@@ -152,15 +169,19 @@ Tags 判断：看 Related Work 小标题 + Abstract 关键词。第一个 tag �
 
 1. 只有在 `AUTO_REFRESH_INDEXES=true` 时才刷新目录页：
    ```bash
-   python3 ../_shared/generate_concept_mocs.py
-   python3 ../_shared/generate_paper_mocs.py
+   python3 "{SKILLS_ROOT}/_shared/generate_concept_mocs.py"
+   python3 "{SKILLS_ROOT}/_shared/generate_paper_mocs.py"
    ```
-2. 只有在 `GIT_COMMIT_ENABLED=true` 时才做 git：
+2. 当 `DAILYPAPER_PARENT_RUN=true` 时，将变更路径返回给父流程，**不得执行任何
+   git add、commit 或 push**。
+3. 只有独立调用且 `GIT_COMMIT_ENABLED=true` 时才做 git：
    - 先确认 `VAULT_PATH/.git` 存在
-   - `git add {新增文件} {paper_notes_folder}/` 后必须真的有 staged changes
+   - 开始前要求工作树干净
+   - 只暂存本次创建或修改的明确路径，不得使用 `git add -A`
    - 满足条件后再执行：
    ```bash
-   cd {VAULT_PATH} && git add {新增文件} {paper_notes_folder}/ && git commit -m "add paper note: {方法名}"
+   git -C "{VAULT_PATH}" add -- {本次变更路径...}
+   git -C "{VAULT_PATH}" commit -m "add paper note: {方法名}"
    ```
    - 只有在 `GIT_PUSH_ENABLED=true` 且仓库已配置远端时才 push
 
@@ -174,7 +195,7 @@ Tags 判断：看 Related Work 小标题 + Abstract 关键词。第一个 tag �
 2. **检查**每个链接对应的概念笔记是否存在（`ls` + `find`）
 3. **创建**不存在的概念（不可跳过），自动归类到对应子目录
 
-> 分类规则和模板见 `references/concept-categories.md`
+> 分类规则和模板见 `{SKILLS_ROOT}/paper-reader/references/concept-categories.md`
 
 ### 自检
 
@@ -201,7 +222,7 @@ Tags 判断：看 Related Work 小标题 + Abstract 关键词。第一个 tag �
 
 ## 参考文件（按需查阅）
 
-- **`references/zotero-guide.md`** — Zotero 查询、分类、PDF 路径获取、智能分类判断
-- **`references/image-troubleshooting.md`** — ar5iv 图片编号对应、PDF 提取备选
-- **`references/concept-categories.md`** — 概念自动归类的 16 个子目录规则 + 模板
-- **`references/quality-standards.md`** — 公式/图片/表格的详细质量规范 + 自检清单
+- **`{SKILLS_ROOT}/paper-reader/references/zotero-guide.md`** — Zotero 查询、分类、PDF 路径获取、智能分类判断
+- **`{SKILLS_ROOT}/paper-reader/references/image-troubleshooting.md`** — ar5iv 图片编号对应、PDF 提取备选
+- **`{SKILLS_ROOT}/paper-reader/references/concept-categories.md`** — 概念自动归类的 16 个子目录规则 + 模板
+- **`{SKILLS_ROOT}/paper-reader/references/quality-standards.md`** — 公式/图片/表格的详细质量规范 + 自检清单
