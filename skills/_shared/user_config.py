@@ -12,9 +12,10 @@ from pathlib import Path
 DEFAULT_CONFIG = {
     "paths": {
         "obsidian_vault": ".",
-        "paper_notes_folder": "PaperNotes",
+        "paper_notes_folder": "论文笔记",
         "daily_papers_folder": "DailyPapers",
-        "concepts_folder": "_concepts",
+        "concepts_folder": "_概念",
+        "inbox_folder": "_待整理",
         "zotero_db": "~/Zotero/zotero.sqlite",
         "zotero_storage": "~/Zotero/storage",
     },
@@ -186,6 +187,10 @@ def daily_papers_dir() -> Path:
 
 def concepts_dir() -> Path:
     return paper_notes_dir() / paths_config()["concepts_folder"]
+
+
+def paper_inbox_dir() -> Path:
+    return paper_notes_dir() / paths_config().get("inbox_folder", "_待整理")
 
 
 def zotero_db_path() -> Path:

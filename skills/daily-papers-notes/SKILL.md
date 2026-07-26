@@ -69,7 +69,7 @@ description: |
 - 技术概念名（如 System Level Synthesis, Consistency Model）
 
 **1c: 创建缺失的概念笔记（自动归类）**
-检查 `{CONCEPTS_PATH}/` 下是否已存在（搜索所有子目录）。对于缺失的概念，**根据概念类型自动归类到对应子目录**，不要全扔 `0-uncategorized/`。
+检查 `{CONCEPTS_PATH}/` 下是否已存在（搜索所有子目录）。对于缺失的概念，**根据概念类型自动归类到对应子目录**，不要全扔 `0-待分类/`。
 
 分类规则见 `{SKILLS_ROOT}/paper-reader/references/concept-categories.md`
 
@@ -179,7 +179,7 @@ python3 "{SKILLS_ROOT}/_shared/generate_paper_mocs.py"
 
    ```bash
    python3 "{SKILLS_ROOT}/_shared/run_context.py" update "{RUN_MANIFEST}" \
-     --changed-path "PaperNotes/实际生成的笔记.md"
+     --changed-path "{paper_notes_folder}/实际生成的笔记.md"
    ```
 
 3. 所有内容检查通过后，将状态更新为 `validated`。最终暂存路径以 manifest 中的

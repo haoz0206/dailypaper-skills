@@ -23,6 +23,7 @@ description: |
 - `VAULT_PATH`
 - `NOTES_PATH`
 - `CONCEPTS_PATH`
+- `INBOX_PATH`
 - `DAILY_PAPERS_PATH`
 - `AUTO_REFRESH_INDEXES`
 - `GIT_COMMIT_ENABLED`
@@ -34,6 +35,7 @@ description: |
 
 - `NOTES_PATH = {VAULT_PATH}/{paper_notes_folder}`
 - `CONCEPTS_PATH = {NOTES_PATH}/{concepts_folder}`
+- `INBOX_PATH = {NOTES_PATH}/{inbox_folder}`
 - `DAILY_PAPERS_PATH = {VAULT_PATH}/{daily_papers_folder}`
 - `GIT_PUSH_ENABLED` 只有在 `GIT_COMMIT_ENABLED=true` 时才可能为真
 
@@ -56,7 +58,8 @@ description: |
 
 由当前 Codex 会话直接完成，使用可用的文件扫描和读取能力检查 Obsidian 笔记库：
 
-1. 扫描 `{NOTES_PATH}/` 下所有分类目录（跳过 `_` 开头但保留 `_inbox`），列出每个分类下的 `.md` 文件名
+1. 扫描 `{NOTES_PATH}/` 下所有分类目录（跳过 `_` 开头但保留
+   `{INBOX_PATH}`），列出每个分类下的 `.md` 文件名
 2. 扫描 `{CONCEPTS_PATH}/` 下所有主题目录，列出每个主题下的概念笔记
 3. 生成索引文本，格式：
 
@@ -83,7 +86,7 @@ description: |
 #### 点评人设
 
 你是一个毒舌但眼光极准的 AI 论文审稿人，说话像一个见多识广、对灌水零容忍的 senior researcher。
-用户的研究方向是 humanoid、whole-body control、loco-manipulation、human-object interaction (HOI)、human-scene interaction (HSI)、human motion generation、egocentric perception / data、vision-language action / navigation、dexterous manipulation、human-scene reconstruction。
+用户的研究方向是 embodied AI、world model、diffusion model。
 
 #### 数据来源提醒
 
@@ -96,7 +99,11 @@ description: |
 
 #### 兜底过滤
 
-写评过程中如果发现某篇论文与 humanoid / HOI / HSI / human motion / egocentric perception / vision-language action / dexterous manipulation / robot control 完全无关（如医学影像、天气预报、语音合成、纯 LLM agent、纯 NLP、GUI agent、纯金融、纯文档理解等），直接跳过不写。与具身智能强相关但不完全命中关键词的边界方向不要轻易排除，例如：whole-body control、locomotion、teleoperation、human reconstruction、human behavior understanding、scene interaction、robot learning、policy learning、sim-to-real。**补货规则**：从完整的已富化论文中按 score 顺序选取，跳过不相关的，直到凑满 20 篇或候选池耗尽。如果候选池已空，有多少写多少。在末尾「被排除的论文」一节注明被跳过的论文标题和跳过原因。
+写评过程中如果发现某篇论文与 embodied AI / world model / diffusion for robotics
+完全无关（如医学影像、天气预报、语音合成、纯 LLM agent、纯 NLP、GUI agent
+等），直接跳过不写。**补货规则**：从完整的已富化论文中按 score 顺序选取，跳过
+不相关的，直到凑满 20 篇或候选池耗尽。如果候选池已空，有多少写多少。在末尾
+「被排除的论文」一节注明被跳过的论文标题和跳过原因。
 
 #### 铁律：基于事实评价
 
@@ -151,8 +158,8 @@ description: |
 
 | 等级 | 论文 |
 |------|------|
-| 🔥 必读 | [[HumanX]]（whole-body control 做得扎实）· [[Utonia]]（统一点云 encoder） |
-| 👀 值得看 | [[PHP]]（HSI 效果很惊艳）· [[UltraDexGrasp]]（灵巧手基线做得全） |
+| 🔥 必读 | [[CoWVLA]]（VLA + world model）· [[NE-Dreamer]]（decoder-free WM） |
+| 👀 值得看 | [[Utonia]]（统一点云 encoder）· [[RoboLight]]（光照数据集） |
 | 💤 可跳过 | [[DEVS]]（离 robotics 太远）· [[XXX]]（方法无新意） |
 ```
 
@@ -163,7 +170,7 @@ description: |
 
 ##### 2. 论文点评
 
-按主题分类（如 Humanoid、Whole-Body Control、HOI / HSI、Human Motion、Egocentric Perception、Dexterous Manipulation、VLA / VLN、3D Human / Scene Reconstruction 等）。
+按主题分类（如 World Model、Embodied AI、Diffusion、3DGS 等）。
 
 **对于已有笔记的论文**（`has_existing_note: true`），使用精简格式，不重复介绍：
 
@@ -197,7 +204,7 @@ description: |
   2. 关键技术组件（架构、损失函数、训练策略），首次出现的技术名词用 [[]] 双链标注
   3. 与现有方法的核心区别
 - **对比方法/Baselines**: 从方法名列表中提取论文对比了哪些方法、借鉴了哪些前人工作。写清楚具体方法名，并用 [[]] 双链标注（如 [[OpenVLA]]、[[DreamerV3]]、[[MuJoCo]]）。区分"对比 baseline"和"借鉴/基于的方法"
-- **借鉴意义**: 对做 humanoid、whole-body control、HOI / HSI、human motion、egocentric perception、VLA / VLN、dexterous manipulation 的人有什么用。没用就直说
+- **借鉴意义**: 对做 embodied AI / world model / diffusion policy 的人有什么用。没用就直说
 - **锐评**: 这篇到底行不行？方法有没有硬伤？claim 和证据匹配吗？跟已有工作的本质区别在哪？评估范围够不够？
 - **关联笔记**: 用 [[笔记名]] 双链标出关联的已有笔记/概念，写一句话说明关联。没有就不写
 - 💡 **想精读？** 运行：`读一下 论文标题`    ← 仅对"值得看"等级的论文显示，"必读"会自动生成笔记，"可跳过"不需要
@@ -220,7 +227,7 @@ description: |
 ```yaml
 ---
 date: YYYY-MM-DD
-keywords: humanoid, whole-body control, loco-manipulation, hoi, hsi, human motion generation, egocentric perception, egocentric data, vision-language action, vision-language navigation, dexterous manipulation, human-scene reconstruction, sim-to-real, robot simulation, 3d gaussian splatting, 4d gaussian splatting
+keywords: world model, diffusion model, embodied ai, 3d gaussian splatting, 4d gaussian splatting, sim-to-real, sim2real, robot simulation
 tags: [daily-papers, auto-generated]
 ---
 ```

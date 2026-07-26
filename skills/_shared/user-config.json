@@ -1,9 +1,10 @@
 {
   "paths": {
     "obsidian_vault": ".",
-    "paper_notes_folder": "PaperNotes",
+    "paper_notes_folder": "论文笔记",
     "daily_papers_folder": "DailyPapers",
-    "concepts_folder": "_concepts",
+    "concepts_folder": "_概念",
+    "inbox_folder": "_待整理",
     "zotero_db": "~/Zotero/zotero.sqlite",
     "zotero_storage": "~/Zotero/storage"
   },
@@ -12,25 +13,13 @@
   },
   "daily_papers": {
     "keywords": [
-      "humanoid",
-      "whole-body control",
-      "loco-manipulation",
-      "human-scene interaction",
-      "human-object interaction",
-      "human-scene reconstruction",
-      "human motion generation",
-      "egocentric perception",
-      "egocentric data",
-      "vision-language action",
-      "vision-language navigation",
       "world model",
-      "dexterous manipulation",
-      "dexterous hand",
-      "teleoperation",
-      "feed-forward reconstruction",
+      "diffusion model",
+      "embodied ai",
       "3d gaussian splatting",
       "4d gaussian splatting",
       "sim-to-real",
+      "sim2real",
       "robot simulation"
     ],
     "negative_keywords": [
@@ -75,7 +64,6 @@
     ],
     "domain_boost_keywords": [
       "robot",
-      "embodied ai",
       "manipulation",
       "grasping",
       "locomotion",
@@ -86,7 +74,7 @@
       "visuomotor",
       "action prediction"
     ],
-    "arxiv_categories": ["cs.RO", "cs.CV", "cs.AI", "cs.GR"],
+    "arxiv_categories": ["cs.RO", "cs.CV", "cs.AI", "cs.LG"],
     "min_score": 2,
     "top_n": 30
   },

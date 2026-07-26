@@ -8,23 +8,26 @@
 
 ## 常用入口
 
-自动化和可复现任务建议显式调用 Skill：
+Claude Code 和 Codex 共用同一组日常输入：
 
 ```text
-使用 $daily-papers 生成今日论文推荐
-使用 $paper-reader 读一下 https://arxiv.org/abs/2509.24527
-使用 $generate-mocs 更新索引
+今日论文推荐
+过去3天论文推荐
+过去一周论文推荐
 ```
 
-也支持：
+读单篇论文和刷新索引：
 
 ```text
-使用 $daily-papers 生成过去 3 天的论文推荐
-使用 $paper-reader 快速看一下 ~/Downloads/paper.pdf
-使用 $paper-reader 批判性分析这篇论文
+读一下这篇论文 https://arxiv.org/abs/2509.24527
+快速看一下这篇论文 ~/Downloads/paper.pdf
+批判性分析这篇论文 ~/Downloads/paper.pdf
+更新索引
 ```
 
-Codex 可以根据 description 隐式触发 Skill，但定时任务应使用 `$skill-name`。
+Codex 仍支持 `$daily-papers`、`$paper-reader`、`$generate-mocs` 作为显式适配器，
+但它们不是用户侧的必要输入。完整的跨 harness 契约见
+[HARNESS_CONTRACT.md](HARNESS_CONTRACT.md)。
 
 ## 输出
 
@@ -39,9 +42,9 @@ ObsidianVault/
 ├── DailyPapers/
 │   ├── YYYY-MM-DD-论文推荐.md
 │   └── .history.json
-└── PaperNotes/
-    ├── _concepts/
-    ├── _inbox/
+└── 论文笔记/
+    ├── _概念/
+    ├── _待整理/
     └── .../*.md
 ```
 
@@ -68,8 +71,8 @@ mkdir -p "$VAULT/.agents/skills"
 cp -R ./skills/. "$VAULT/.agents/skills/"
 
 mkdir -p "$VAULT/DailyPapers" \
-  "$VAULT/PaperNotes/_concepts/0-uncategorized" \
-  "$VAULT/PaperNotes/_inbox"
+  "$VAULT/论文笔记/_概念/0-待分类" \
+  "$VAULT/论文笔记/_待整理"
 ```
 
 Codex 从当前目录向仓库根扫描 `.agents/skills`。因此从 Vault 内启动 Codex 或让
@@ -115,6 +118,7 @@ export DAILYPAPER_CONFIG="$PWD/.dailypaper/config.json"
 | `paths.paper_notes_folder` | 论文笔记目录 |
 | `paths.daily_papers_folder` | 每日推荐目录 |
 | `paths.concepts_folder` | 概念笔记目录 |
+| `paths.inbox_folder` | 无法自动分类的论文目录 |
 | `paths.zotero_db` | 可选 Zotero SQLite 路径 |
 | `daily_papers.keywords` | 正向研究关键词 |
 | `daily_papers.negative_keywords` | 排除关键词 |
@@ -123,7 +127,7 @@ export DAILYPAPER_CONFIG="$PWD/.dailypaper/config.json"
 
 ## 工作流
 
-`$daily-papers` 内部依次执行三个阶段：
+`今日论文推荐` 入口内部依次执行三个阶段：
 
 1. **抓取与富化**：抓取 HF/arXiv，打分、去重并补充作者、机构、方法和图片信息。
 2. **点评**：生成“必读 / 值得看 / 可跳过”的推荐页并更新 history。
@@ -138,7 +142,8 @@ export DAILYPAPER_CONFIG="$PWD/.dailypaper/config.json"
 - `$daily-papers-review`
 - `$daily-papers-notes`
 
-它们默认关闭隐式调用，正常使用只需 `$daily-papers`。
+它们默认关闭隐式调用，正常使用只需说 `今日论文推荐`。需要排查 Codex Skill
+路由时，才使用 `$daily-papers` 或内部阶段的显式名称。
 
 ## Git 与多设备同步
 
@@ -173,16 +178,16 @@ Cloud 默认交付完整 diff/PR，不应假定它能无人值守直推 `main`�
 scheduler 作为外部 adapter：可使用 Codex Desktop Scheduled，或用 GitHub Actions
 cron 触发并在质量检查后创建 PR。
 
-定时 prompt 只需要：
+Claude Code 与 Codex 的定时 prompt 都只需要：
 
 ```text
-使用 $daily-papers 生成 Asia/Shanghai 时区的今日论文推荐
+今日论文推荐
 ```
 
 ## Zotero
 
 每日推荐不读取 Zotero。`$paper-reader` 接收 arXiv URL 或本地 PDF 时，也不会检查
-Zotero SQLite；无法分类的非 Zotero 论文保存到 `PaperNotes/_inbox/`。
+Zotero SQLite；无法分类的非 Zotero 论文保存到 `论文笔记/_待整理/`。
 
 只有明确搜索 Zotero、批量处理 Zotero 分类或运行 `paper_daemon.py` 时才需要 Zotero。
 守护进程使用当前 Codex 非交互参数，并允许通过以下环境变量调整：

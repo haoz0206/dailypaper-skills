@@ -78,6 +78,32 @@ class UserConfigTests(unittest.TestCase):
         self.assertEqual(paths["obsidian_vault"], ".")
         self.assertNotIn("/Users/", json.dumps(paths))
 
+    def test_default_output_paths_match_shared_harness_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(
+                os.environ,
+                {"DAILYPAPER_VAULT": temp_dir},
+                clear=False,
+            ):
+                user_config.clear_config_cache()
+                vault = Path(temp_dir).resolve()
+                self.assertEqual(
+                    user_config.daily_papers_dir(),
+                    vault / "DailyPapers",
+                )
+                self.assertEqual(
+                    user_config.paper_notes_dir(),
+                    vault / "论文笔记",
+                )
+                self.assertEqual(
+                    user_config.concepts_dir(),
+                    vault / "论文笔记" / "_概念",
+                )
+                self.assertEqual(
+                    user_config.paper_inbox_dir(),
+                    vault / "论文笔记" / "_待整理",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

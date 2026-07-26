@@ -29,6 +29,7 @@ description: |
 - `VAULT_PATH`
 - `NOTES_PATH`
 - `CONCEPTS_PATH`
+- `INBOX_PATH`
 - `ZOTERO_DB`
 - `ZOTERO_STORAGE`
 - `AUTO_REFRESH_INDEXES`
@@ -40,6 +41,7 @@ description: |
 
 - `NOTES_PATH = {VAULT_PATH}/{paper_notes_folder}`
 - `CONCEPTS_PATH = {NOTES_PATH}/{concepts_folder}`
+- `INBOX_PATH = {NOTES_PATH}/{inbox_folder}`
 - `GIT_PUSH_ENABLED` 只有在 `GIT_COMMIT_ENABLED=true` 时才可能为真
 
 后续统一使用上面的变量。
@@ -134,13 +136,13 @@ python3 "{SKILLS_ROOT}/daily-papers/download_note_images.py" "{笔记完整路�
 
 只用**方法名/模型名**：`{方法名}.md`（如 `Pi05.md`，不加年份前缀）。
 方法名判断：标题冒号前 / Abstract 中 "We propose XXX" / 希腊字母转 ASCII。
-不确定时保存到 `_inbox/`。
+不确定时保存到 `{INBOX_PATH}`。
 
 ### 保存路径
 
 - Zotero 输入：优先按 `{NOTES_PATH}/{zotero_collection_path}/{方法名}.md` 保存。
 - arXiv URL 或本地 PDF：按论文主题选择现有分类；无法可靠分类时保存到
-  `{NOTES_PATH}/_inbox/{方法名}.md`。
+  `{INBOX_PATH}/{方法名}.md`。
 - 所有目标路径必须位于 `NOTES_PATH` 内。
 
 ### YAML frontmatter

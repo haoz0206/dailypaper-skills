@@ -38,7 +38,14 @@ _SHARED_DIR = Path(__file__).resolve().parents[1] / "_shared"
 if str(_SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(_SHARED_DIR))
 
-from user_config import concepts_dir, obsidian_vault_path, paper_notes_dir, zotero_db_path, zotero_storage_dir
+from user_config import (
+    concepts_dir,
+    obsidian_vault_path,
+    paper_inbox_dir,
+    paper_notes_dir,
+    zotero_db_path,
+    zotero_storage_dir,
+)
 
 # 配置
 ZOTERO_DB = str(zotero_db_path())
@@ -46,6 +53,7 @@ ZOTERO_STORAGE = str(zotero_storage_dir())
 OBSIDIAN_VAULT = str(obsidian_vault_path())
 PAPER_NOTES_ROOT = str(paper_notes_dir())
 CONCEPTS_ROOT = str(concepts_dir())
+INBOX_ROOT = str(paper_inbox_dir())
 _XDG_STATE_HOME = Path(
     os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")
 ).expanduser()
@@ -346,7 +354,7 @@ def get_existing_notes() -> dict[str, str]:
         for md_file in notes_dir.rglob("*.md"):
             name = md_file.stem
             relative_parts = md_file.relative_to(notes_dir).parts
-            # 跳过 _inbox、_concepts 等特殊目录和目录页
+            # 跳过配置中的收件箱、概念目录等特殊目录和目录页
             if any(part.startswith("_") for part in relative_parts):
                 continue
             if md_file.parent.name == name:
@@ -616,7 +624,7 @@ $$公式$$
 
 根据你对论文的理解，保存到对应的 Obsidian 目录：
 - 基本结构：{notes_root}/对应分类路径/
-- 不确定时：{notes_root}/_inbox/
+- 不确定时：{INBOX_ROOT}/
 
 请直接开始处理，不需要确认。提取所有公式、图片和表格。"""
 

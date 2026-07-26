@@ -9,8 +9,8 @@
     │
     ├─ "今日论文推荐" ──→ daily-papers（编排器）
     │                        ├─ Step 1: daily-papers-fetch（Python，零 token）
-    │                        ├─ Step 2: daily-papers-review（Codex 点评）
-    │                        └─ Step 3: daily-papers-notes（Codex + paper-reader）
+    │                        ├─ Step 2: daily-papers-review（当前 agent 点评）
+    │                        └─ Step 3: daily-papers-notes（当前 agent + paper-reader）
     │
     ├─ "读一下这篇论文" ──→ paper-reader（独立 skill）
     │
@@ -25,7 +25,7 @@
 
 ## Step 1: daily-papers-fetch
 
-**纯 Python，不消耗 Codex token。**
+**纯 Python，不消耗模型 token。**
 
 ### 1.1 抓取 + 打分（fetch_and_score.py）
 
@@ -65,7 +65,7 @@
 
 ## Step 2: daily-papers-review
 
-**Codex 主导，读候选列表写点评。**
+**当前 agent 主导，读候选列表写点评。**
 
 ### 2.1 扫描已有笔记
 
@@ -73,7 +73,7 @@
 
 ### 2.2 写锐评
 
-Codex 以"毒舌但有料的资深研究员"角色点评每篇论文：
+当前 agent 以"毒舌但有料的资深研究员"角色点评每篇论文：
 - 分流表：🔥 必读 / 👀 值得看 / 💤 可跳过
 - 每篇包含：作者、机构、链接、来源、核心方法（带 `[[概念]]` 链接）、对比方法、借鉴意义、锐评
 - 已有笔记的论文走简化格式
@@ -94,7 +94,7 @@ Codex 以"毒舌但有料的资深研究员"角色点评每篇论文：
 
 ## Step 3: daily-papers-notes
 
-**Codex 编排 + 多次调用 paper-reader。**
+**当前 agent 编排 + 多次调用 paper-reader。**
 
 ### 3.1 概念库补充
 
@@ -174,8 +174,8 @@ Codex 以"毒舌但有料的资深研究员"角色点评每篇论文：
 ### 存储
 
 - Zotero 输入：`{NOTES_PATH}/{zotero_collection_path}/{MethodName}.md`
-- 非 Zotero 输入：根据主题分类，无法判断时写入 `{NOTES_PATH}/_inbox/`
-- 不确定分类 → `_inbox/`
+- 非 Zotero 输入：根据主题分类，无法判断时写入 `{INBOX_PATH}/`
+- 默认未分类目录为 `_待整理/`
 - YAML frontmatter：title / method_name / authors / year / venue / tags / 可选 zotero_collection / image_source / created
 
 ### 概念库维护
@@ -213,7 +213,7 @@ python3 paper_daemon.py --list       # 列出所有分类
 - 用 wikilink 格式
 
 分两个入口：
-- `generate_concept_mocs.py`：扫描配置中的概念库目录（默认 `_concepts/`）
+- `generate_concept_mocs.py`：扫描配置中的概念库目录（默认 `_概念/`）
 - `generate_paper_mocs.py`：扫描论文笔记（排除概念目录）
 
 ---
@@ -228,9 +228,10 @@ python3 paper_daemon.py --list       # 列出所有分类
 {
   "paths": {
     "obsidian_vault": ".",
-    "paper_notes_folder": "PaperNotes",
+    "paper_notes_folder": "论文笔记",
     "daily_papers_folder": "DailyPapers",
-    "concepts_folder": "_concepts",
+    "concepts_folder": "_概念",
+    "inbox_folder": "_待整理",
     "zotero_db": "~/Zotero/zotero.sqlite",
     "zotero_storage": "~/Zotero/storage"
   },
@@ -238,7 +239,7 @@ python3 paper_daemon.py --list       # 列出所有分类
     "keywords": ["world model", "diffusion model", "embodied ai", ...],
     "negative_keywords": ["medical imaging", "weather forecast", ...],
     "domain_boost_keywords": ["robot", "manipulation", ...],
-    "arxiv_categories": ["cs.RO", "cs.CV", "cs.AI", "cs.GR"],
+    "arxiv_categories": ["cs.RO", "cs.CV", "cs.AI", "cs.LG"],
     "min_score": 2,
     "top_n": 30
   },
@@ -270,21 +271,21 @@ MOC 生成引擎，被 `generate_concept_mocs.py` 和 `generate_paper_mocs.py` �
 ├── DailyPapers/
 │   ├── YYYY-MM-DD-论文推荐.md      # 每日推荐
 │   └── .history.json                # 跨天去重索引
-├── PaperNotes/
+├── 论文笔记/
 │   ├── 3-Robotics/
 │   │   ├── 1-VLX/VLA/
 │   │   │   ├── VLA.md               # 目录页（自动生成）
 │   │   │   ├── OpenVLA.md
 │   │   │   └── Pi05.md
 │   │   └── ...
-│   ├── _concepts/
+│   ├── _概念/
 │   │   ├── 1-生成模型/
 │   │   │   ├── DiT.md
 │   │   │   └── Flow Matching.md
 │   │   ├── 3-机器人策略/
 │   │   │   └── Diffusion Policy.md
 │   │   ├── ... (共 16 个分类)
-│   │   └── 0-uncategorized/
-│   └── _inbox/                     # 无法自动归类的论文
+│   │   └── 0-待分类/
+│   └── _待整理/                    # 无法自动归类的论文
 └── ...
 ```

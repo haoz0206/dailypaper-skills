@@ -47,8 +47,8 @@ class ReorganizeNotesTests(unittest.TestCase):
             ):
                 user_config.clear_config_cache()
                 module = load_reorganize_module()
-                notes_root = vault / "PaperNotes"
-                concept_note = notes_root / "_concepts" / "topic" / "Concept.md"
+                notes_root = vault / "论文笔记"
+                concept_note = notes_root / "_概念" / "topic" / "Concept.md"
                 paper_note = notes_root / "Robotics" / "Paper.md"
                 concept_note.parent.mkdir(parents=True)
                 paper_note.parent.mkdir(parents=True)
@@ -59,6 +59,17 @@ class ReorganizeNotesTests(unittest.TestCase):
                 found = module.get_all_notes()
 
             self.assertEqual(found, [paper_note])
+
+    def test_uncategorized_notes_use_shared_inbox_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(
+                os.environ,
+                {"DAILYPAPER_VAULT": temp_dir},
+                clear=False,
+            ):
+                user_config.clear_config_cache()
+                module = load_reorganize_module()
+                self.assertEqual(module.determine_category([]), "_待整理")
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ _SHARED_DIR = Path(__file__).resolve().parents[2] / "_shared"
 if str(_SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(_SHARED_DIR))
 
-from user_config import paper_notes_dir, paths_config, zotero_db_path
+from user_config import paper_inbox_dir, paper_notes_dir, paths_config, zotero_db_path
 
 # 配置
 PAPER_NOTES_ROOT = paper_notes_dir()
@@ -171,7 +171,7 @@ def strip_inline_comment(raw_value: str) -> str:
 def determine_category(tags: List[str], title: str = "") -> str:
     """根据 tags 判断论文应该属于哪个分类"""
     if not tags:
-        return "_inbox"
+        return paper_inbox_dir().name
 
     # 确保所有 tags 都是字符串
     tags_lower = [str(t).lower() for t in tags]
@@ -203,7 +203,7 @@ def determine_category(tags: List[str], title: str = "") -> str:
     best_category = max(scores, key=scores.get)
     if scores[best_category] > 0:
         return best_category
-    return "_inbox"
+    return paper_inbox_dir().name
 
 
 def get_all_notes() -> List[Path]:
