@@ -64,6 +64,9 @@ def create_run(
         "target_date": date,
         "timezone": timezone,
         "changed_paths": [],
+        "coordination": {
+            "status": "not-acquired",
+        },
         "paths": {
             "vault": str(vault),
             "run_dir": str(run_dir),
@@ -92,6 +95,7 @@ def update_manifest(
     *,
     status: str | None = None,
     changed_paths: list[Path] | None = None,
+    coordination: dict | None = None,
 ) -> dict:
     """Update a run manifest and keep changed paths relative to the Vault."""
     manifest_path = path.expanduser().resolve()
@@ -117,6 +121,10 @@ def update_manifest(
         if relative not in recorded:
             recorded.append(relative)
     data["changed_paths"] = recorded
+    if coordination:
+        current_coordination = dict(data.get("coordination", {}))
+        current_coordination.update(coordination)
+        data["coordination"] = current_coordination
 
     temporary_path = manifest_path.with_suffix(".json.tmp")
     temporary_path.write_text(

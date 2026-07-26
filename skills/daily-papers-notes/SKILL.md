@@ -2,7 +2,7 @@
 name: daily-papers-notes
 description: |
   论文笔记生成（3 步流水线的第 3 步）。补充概念库，为推荐论文生成完整笔记，
-  链接回填到推荐文件；目录页默认自动刷新，git 自动化默认关闭。
+  链接回填到推荐文件；目录页默认自动刷新，由父流程统一协调远程 Vault 发布。
 
   触发词："批量笔记"、"跑一下论文笔记"
 ---
@@ -43,9 +43,10 @@ description: |
 ## 前置检查
 
 1. 检查 `RUN_MANIFEST` 和其中声明的 `ENRICHED_INPUT` 是否存在
-2. 检查今天的推荐文件 `{DAILY_PAPERS_PATH}/YYYY-MM-DD-论文推荐.md` 是否存在
-3. 如果任一不存在，告知用户需要先运行前置步骤，然后停止
-4. 检查通过后运行：
+2. 确认 `RUN_MANIFEST.coordination.status` 是 `acquired`
+3. 检查今天的推荐文件 `{DAILY_PAPERS_PATH}/YYYY-MM-DD-论文推荐.md` 是否存在
+4. 如果任一不存在或未取得所有权，告知用户需要从每日入口启动，然后停止
+5. 检查通过后运行：
 
    ```bash
    python3 "{SKILLS_ROOT}/_shared/run_context.py" update "{RUN_MANIFEST}" \
@@ -170,7 +171,7 @@ python3 "{SKILLS_ROOT}/_shared/generate_paper_mocs.py"
 
 默认配置下这个开关是开启的，所以新增的概念和论文笔记通常会自动反映到各分类目录页中。
 
-### Step 5: 最终验证与单一 Git 发布
+### Step 5: 最终验证与原子 Git 发布
 
 1. 确认所有必读论文笔记、概念、链接和 MOC 均已通过检查。
 2. 将本次实际创建或修改的 Vault 相对路径加入 `CHANGED_PATHS`，去重并确认没有
@@ -190,17 +191,19 @@ python3 "{SKILLS_ROOT}/_shared/generate_paper_mocs.py"
      --status validated
    ```
 
-4. 仅当 `GIT_COMMIT_ENABLED=true`、Vault 是 Git 仓库且开始运行时工作树干净，
-   才使用 `git add -- <CHANGED_PATHS...>` 精确暂存这些文件。
-5. 禁止使用 `git add -A`。如果发现不属于本次运行的 staged/dirty 文件，停止发布。
-6. 暂存内容非空时只创建一次提交：
+4. 调用确定性协调器完成任务状态校验、精确暂存、单一内容 commit 和 push：
 
    ```bash
-   git -C "{VAULT_PATH}" commit -m "daily papers: YYYY-MM-DD"
+   python3 "{SKILLS_ROOT}/_shared/vault_coordination.py" complete \
+     "{RUN_MANIFEST}"
    ```
 
-7. 只有提交成功、`GIT_PUSH_ENABLED=true` 且已配置远端时才 push。push 失败时保留
-   本地提交并明确报告，不得重复生成内容。
+5. 禁止手工执行 `git add -A`、commit、rebase 或 force push。协调器会：
+   - 验证远程仍停留在本次抢锁 commit；
+   - 验证配置指纹和远程任务 `run_id` 没有变化；
+   - 拒绝 manifest 之外的工作树修改；
+   - 将任务状态与稳定输出放入同一个内容 commit；
+   - 普通 push 失败时保留本地提交并停止，不得重新生成内容。
 
 ## 输出
 
@@ -215,7 +218,7 @@ python3 "{SKILLS_ROOT}/_shared/generate_paper_mocs.py"
 - 如果前置文件不存在，必须先运行前面的步骤
 - `paper-reader` skill 会自动处理概念库补充，不要重复创建
 - 仅为"必读"论文生成笔记，"值得看"不生成，耗时正常，**不是跳过的理由**
-- 默认自动刷新目录页，但默认不做 git commit / push
+- 默认自动刷新目录页，并按远程 Vault 协调契约发布
 - **绝对禁止**以下偷懒行为：
   - 自己手写 70 行骨架笔记代替 paper-reader 输出
   - 以"context overflow"为由跳过论文不生成笔记

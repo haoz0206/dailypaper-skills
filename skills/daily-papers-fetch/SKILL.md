@@ -51,6 +51,16 @@ python3 "{SKILLS_ROOT}/_shared/run_context.py" create \
 
 记住返回的 manifest 绝对路径；禁止复用其他运行的 manifest。
 
+随后必须取得 Vault 任务所有权：
+
+```bash
+python3 "{SKILLS_ROOT}/_shared/vault_coordination.py" acquire \
+  "{RUN_MANIFEST}" --harness codex
+```
+
+如果父流程已经提供 manifest，则确认 `RUN_MANIFEST.coordination.status` 是
+`acquired`。任何其他状态都停止；内部阶段不得绕过协调器直接写 Vault。
+
 后续统一以共享配置和上面的变量为准。
 
 开始抓取前更新运行状态：

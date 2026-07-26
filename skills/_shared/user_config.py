@@ -22,6 +22,17 @@ DEFAULT_CONFIG = {
     "runtime": {
         "timezone": "Asia/Shanghai",
     },
+    "repository": {
+        "url": "git@github.com:haoz0206/dailypaper-vault.git",
+        "remote": "origin",
+        "branch": "main",
+        "task_state_file": ".dailypaper/tasks/daily-papers.json",
+        "pull_before_run": True,
+        "require_clean": True,
+        "coordination_enabled": True,
+        "lease_hours": 24,
+        "same_day_policy": "skip",
+    },
     "daily_papers": {
         "keywords": [
             "world model",
@@ -164,6 +175,10 @@ def automation_config() -> dict:
         config = copy.deepcopy(config)
         config["git_push"] = False
     return config
+
+
+def repository_config() -> dict:
+    return load_user_config()["repository"]
 
 
 def runtime_config() -> dict:

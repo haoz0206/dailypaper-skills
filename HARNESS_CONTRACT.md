@@ -44,10 +44,26 @@ Both adapters read the same logical configuration:
 - `paths.zotero_db` and `paths.zotero_storage` for explicit Zotero workflows
 - `daily_papers.*`
 - `runtime.timezone`
+- `repository.*`
 - `automation.*`
 
 Research interests belong in shared or local configuration, never in a harness
-adapter. Local overrides must not need to be committed.
+adapter. Machine-local paths may differ, but all output-affecting configuration
+must produce the same configuration fingerprint for a coordinated run.
+
+The coordinated Vault repository is fixed to:
+
+```text
+git@github.com:haoz0206/dailypaper-vault.git
+```
+
+Both adapters use remote `origin`, branch `main`, and IANA timezone
+`Asia/Shanghai` by default. They must reject a different remote or branch rather
+than silently publishing elsewhere.
+
+`automation.git_commit` and `automation.git_push` control standalone helper
+Skills only. A full daily run always uses the acquisition and publication
+commits required by the coordination protocol.
 
 ## Stable outputs
 
@@ -70,14 +86,90 @@ wikilinks, MOC pages, and image assets are stable outputs. Per-run manifests
 and enriched JSON are internal implementation details and are not a stable
 interface.
 
+### Daily recommendation schema
+
+`DailyPapers/YYYY-MM-DD-论文推荐.md` starts with:
+
+```yaml
+---
+date: YYYY-MM-DD
+keywords: <configured keywords in configured order>
+tags: [daily-papers, auto-generated]
+---
+```
+
+The body contains, in order:
+
+1. `# 🔪 今日锐评`
+2. `## 分流表`
+3. numbered paper reviews grouped by topic
+4. excluded papers when applicable
+5. one closing trend judgment
+
+The split table uses method/model-name wikilinks and the three stable levels
+`🔥 必读`, `👀 值得看`, and `💤 可跳过`.
+
+### Paper-note schema
+
+Paper notes keep the frontmatter keys defined in
+`skills/paper-reader/assets/paper-note-template.md`, including `title`,
+`method_name`, `authors`, `year`, `venue`, `tags`, `zotero_collection`,
+`image_source`, `arxiv_html`, and `created`. Non-Zotero inputs write an empty
+`zotero_collection`.
+
+The stable note sections are `元信息`, `一句话总结`, `核心贡献`, `问题背景`,
+`方法详解`, `关键公式`, `关键图表`, `实验结果`, `批判性思考`, `关联笔记`,
+and `速查卡片`. Harnesses may produce different prose, rankings, and extracted
+details, but may not change this schema or the Vault paths.
+
+## Vault coordination protocol
+
+The Git remote branch is the atomic coordination component. The task document
+is:
+
+```text
+.dailypaper/tasks/daily-papers.json
+```
+
+It records schema version, task, target date, status, globally unique run ID,
+harness, owner, timestamps, lease, starting commit, stable configuration
+fingerprint, and expected daily output.
+
+Every full daily run must:
+
+1. Create an isolated local run manifest.
+2. Verify that the configured Vault is the Git root, `origin` matches the fixed
+   repository, the current branch is `main`, and the worktree is clean.
+3. Run `git pull --ff-only origin main`.
+4. Stop successfully if the target day's recommendation already exists.
+5. Stop without writing if another `running` task owns the document.
+6. Write its own `running` state in an isolated candidate clone and push that
+   acquisition commit.
+7. Continue only when that ordinary push succeeds. A non-fast-forward rejection
+   means another runner won.
+8. Generate and validate outputs without independent Git commits.
+9. Before publication, fetch and verify that the remote HEAD is still the
+   acquisition commit, the task document still contains the same run ID, and
+   the stable configuration fingerprint is unchanged.
+10. Publish the task's `success` state and exactly the manifest's changed paths
+    in one content commit with an ordinary push.
+
+Acquisition or publication failure must never trigger force push, automatic
+rebase, lock stealing, or content regeneration. A crashed run leaves a visible
+`running` state for explicit operator recovery.
+
+Per-run intermediate files remain under ignored `.dailypaper/runs/`. The task
+document is tracked and is part of the coordination interface.
+
 ## Publication result
 
 Git automation has the same observable result on both harnesses:
 
-1. Generate and validate all daily outputs.
-2. Stage only paths written by the current run.
-3. Create at most one daily commit.
-4. Push only when explicitly enabled.
+1. Create one acquisition commit before expensive work.
+2. Generate and validate all daily outputs.
+3. Stage only paths written by the current run plus the task document.
+4. Create at most one content commit for the run.
+5. Push both commits without force.
 
 ## Allowed adapter differences
 
@@ -91,9 +183,10 @@ Changes to default research keywords, output directories, note templates,
 scoring rules, or generated Markdown require a shared workflow change and
 should be applied to both branches.
 
-## Current implementation status
+## Adapter validation
 
-The Codex adapter implements isolated run manifests and a single exact-path
-publication step. The Claude Code `main` branch still uses fixed temporary JSON
-paths and may commit in both review and notes stages. These are documented
-compatibility gaps, not intended differences in the stable interface.
+Codex adapters keep valid `agents/openai.yaml` metadata. Claude Code adapters
+keep valid Claude discovery paths, invocation syntax, and any Claude-specific
+frontmatter or tool permissions. Those adapters call the same Python run
+context and Vault coordination scripts; they do not reimplement Git safety in
+natural-language instructions.

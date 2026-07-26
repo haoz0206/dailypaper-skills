@@ -2,7 +2,7 @@
 name: daily-papers-review
 description: |
   论文点评（3 步流水线的第 2 步）。读取富化后的论文数据，扫描笔记库，生成有态度的推荐点评，
-  保存推荐文件到 Obsidian，更新 history；git 自动化默认关闭。
+  保存推荐文件到 Obsidian，更新 history；由父流程统一协调远程 Vault 发布。
 
   触发词："论文点评"、"跑一下论文点评"
 ---
@@ -44,8 +44,9 @@ description: |
 ## 前置检查
 
 1. 检查 `RUN_MANIFEST` 和其中声明的 `ENRICHED_INPUT` 是否存在
-2. 如果不存在，告知用户需要先运行 `跑一下论文抓取`，然后停止
-3. 检查通过后运行：
+2. 确认 `RUN_MANIFEST.coordination.status` 是 `acquired`
+3. 如果不存在或未取得所有权，告知用户需要从每日入口启动，然后停止
+4. 检查通过后运行：
 
    ```bash
    python3 "{SKILLS_ROOT}/_shared/run_context.py" update "{RUN_MANIFEST}" \

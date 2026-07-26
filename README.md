@@ -51,14 +51,13 @@ Codex 仍支持 `$daily-papers`、`$paper-reader`、`$generate-mocs` 作为显�
 | Skill 安装 | `~/.claude/skills` | 项目级 `.agents/skills` 或用户级 `~/.agents/skills` |
 | 显式调用 | `/daily-papers` | `$daily-papers` |
 | Skill 元数据 | frontmatter 的 `context`、`allowed-tools` | `agents/openai.yaml` |
-| Vault 默认根目录 | `~/ObsidianVault` | 当前 Git 仓库根目录 `"."` |
-| 中间数据 | 固定临时 JSON | `.dailypaper/runs/<run-id>/` 隔离 manifest |
-| 日报 Git 行为 | review/notes 阶段可分别提交，notes 使用 `git add -A` | 全部验证后精确暂存，最多一次提交 |
-| 非 Zotero 单篇输入 | 说明仍偏向 Zotero 分类路径 | 明确不访问 Zotero，无法分类时写 `_待整理/` |
+| Vault 默认根目录 | 当前 Git 仓库根目录 `"."` | 相同 |
+| 中间数据 | `.dailypaper/runs/<run-id>/` 隔离 manifest | 相同 |
+| 日报 Git 行为 | acquisition commit + 一个精确内容 commit | 相同 |
+| 非 Zotero 单篇输入 | 不访问 Zotero，无法分类时写 `_待整理/` | 相同 |
 
-因此混用时，应让两个 harness 指向同一个 Vault 和同一份业务配置，并统一使用自然语言
-入口。不要同时运行两个 agent 修改同一天的推荐页。上表后三项是 `main` 尚未同步的
-实现差异，不属于期望长期保留的用户接口。
+两个 harness 都会验证固定 Vault 远程并通过任务状态文档原子取得同日写入权。应统一
+使用自然语言入口；显式调用和安装/元数据仍属于 adapter 差异。
 
 ## 输出
 
@@ -69,7 +68,9 @@ ObsidianVault/
 ├── .agents/skills/                 # Codex 项目 Skill
 ├── .dailypaper/
 │   ├── config.json                 # 可选的仓库级配置
-│   └── runs/                       # 运行状态，已忽略
+│   ├── tasks/
+│   │   └── daily-papers.json       # 已跟踪的跨 harness 任务状态
+│   └── runs/                       # 本地运行 manifest，已忽略
 ├── DailyPapers/
 │   ├── YYYY-MM-DD-论文推荐.md
 │   └── .history.json
@@ -125,7 +126,8 @@ cp -R ./skills/. ~/.agents/skills/
 - `paths.obsidian_vault` 默认是 `"."`；
 - 相对 Vault 路径固定解析到当前 Git 仓库根目录；
 - 默认时区是 `Asia/Shanghai`；
-- Git commit/push 默认关闭；
+- Vault 远程固定为 `git@github.com:haoz0206/dailypaper-vault.git`；
+- 完整日报始终使用协调 commit/push；独立 Skill 的 Git 自动化默认关闭；
 - Zotero 路径仅在明确使用 Zotero 功能时访问。
 
 本地个人配置可写入 `_shared/user-config.local.json`。也可以使用环境变量：
@@ -155,6 +157,9 @@ export DAILYPAPER_CONFIG="$PWD/.dailypaper/config.json"
 | `daily_papers.negative_keywords` | 排除关键词 |
 | `daily_papers.domain_boost_keywords` | 领域加分词 |
 | `runtime.timezone` | 日报日期使用的 IANA 时区 |
+| `repository.url` | 唯一允许发布的 Vault 远程地址 |
+| `repository.branch` | 协调和发布分支，默认 `main` |
+| `repository.task_state_file` | 跨机器任务状态文档 |
 
 ## 工作流
 
@@ -176,7 +181,7 @@ export DAILYPAPER_CONFIG="$PWD/.dailypaper/config.json"
 它们默认关闭隐式调用，正常使用只需说 `今日论文推荐`。需要排查 Codex Skill
 路由时，才使用 `$daily-papers` 或内部阶段的显式名称。
 
-## Git 与多设备同步
+## Git 与多设备协调
 
 默认设置：
 
@@ -184,8 +189,17 @@ export DAILYPAPER_CONFIG="$PWD/.dailypaper/config.json"
 - `git_commit = false`
 - `git_push = false`
 
-打开 Git 自动化后，完整日报只在所有阶段验证成功时提交一次，只暂存本次运行记录的
-文件，不使用 `git add -A`。建议开始自动任务前保持 Vault 工作树干净。
+这两个开关只控制独立调用 `paper-reader` / `generate-mocs` 时的 Git 行为。完整日报的
+acquisition 和内容发布属于远程协调协议，不受这两个开关影响。
+
+完整日报运行前会验证 Vault 的 `origin` 和 `main` 分支、要求工作树干净并执行
+`git pull --ff-only`。随后在 `.dailypaper/tasks/daily-papers.json` 写入唯一
+`run_id`，通过独立 acquisition commit/push 原子取得任务所有权。push 被拒绝代表
+另一个 harness 已先取得任务，本次运行立即停止。
+
+全部阶段验证成功后，协调器只暂存 manifest 记录的路径和任务状态文档，创建一个内容
+commit 并普通 push。禁止 `git add -A`、自动 rebase 和 force push。配置发生变化、
+远程 HEAD 已移动或任务所有者改变时，保留本地内容并停止发布。
 
 Mac 端阅读时：
 
@@ -193,8 +207,9 @@ Mac 端阅读时：
 git pull --ff-only
 ```
 
-避免在 Mac 和服务器上同时修改 agent 管理的推荐页或论文笔记；个人批注最好放在独立
-笔记中。
+当天输出已经存在时，任一 harness 都会直接返回“已完成”，不会再次生成。Mac 在任务
+状态为 `running` 时不要修改 agent 管理的推荐页或论文笔记；个人批注最好放在独立
+笔记中。进程异常留下的 `running` 状态不会被自动抢占，需要先检查远程输出再人工恢复。
 
 ## Codex Cloud 与定时任务
 

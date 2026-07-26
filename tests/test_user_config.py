@@ -104,6 +104,16 @@ class UserConfigTests(unittest.TestCase):
                     vault / "论文笔记" / "_待整理",
                 )
 
+    def test_default_repository_matches_coordinated_vault(self) -> None:
+        repository = user_config.repository_config()
+        self.assertEqual(
+            repository["url"],
+            "git@github.com:haoz0206/dailypaper-vault.git",
+        )
+        self.assertEqual(repository["remote"], "origin")
+        self.assertEqual(repository["branch"], "main")
+        self.assertTrue(repository["coordination_enabled"])
+
 
 if __name__ == "__main__":
     unittest.main()

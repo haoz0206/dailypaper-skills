@@ -11,6 +11,17 @@
   "runtime": {
     "timezone": "Asia/Shanghai"
   },
+  "repository": {
+    "url": "git@github.com:haoz0206/dailypaper-vault.git",
+    "remote": "origin",
+    "branch": "main",
+    "task_state_file": ".dailypaper/tasks/daily-papers.json",
+    "pull_before_run": true,
+    "require_clean": true,
+    "coordination_enabled": true,
+    "lease_hours": 24,
+    "same_day_policy": "skip"
+  },
   "daily_papers": {
     "keywords": [
       "world model",
