@@ -299,6 +299,48 @@ class VaultCoordinationTests(unittest.TestCase):
 
         self.assertEqual(caught.exception.status, "config-conflict")
 
+    def test_lost_acquisition_race_does_not_move_local_head(self) -> None:
+        manifest = self._manifest()
+        initial_head = git(self.vault, "rev-parse", "HEAD")
+        with patch.object(
+            vault_coordination,
+            "_push_lock_commit",
+            return_value=(False, "candidate", "non-fast-forward"),
+        ):
+            with self.assertRaises(vault_coordination.CoordinationError) as caught:
+                vault_coordination.acquire(
+                    manifest,
+                    harness="codex",
+                    owner="losing-host",
+                )
+
+        self.assertEqual(caught.exception.status, "lock-raced")
+        self.assertEqual(git(self.vault, "rev-parse", "HEAD"), initial_head)
+        self.assertFalse(
+            (
+                self.vault
+                / ".dailypaper"
+                / "tasks"
+                / "daily-papers.json"
+            ).exists()
+        )
+
+    def test_repository_url_cannot_be_overridden(self) -> None:
+        manifest = self._manifest()
+        config = json.loads(self.config_path.read_text(encoding="utf-8"))
+        config["repository"]["url"] = str(self.root / "other.git")
+        self.config_path.write_text(json.dumps(config), encoding="utf-8")
+        user_config.clear_config_cache()
+
+        with self.assertRaises(vault_coordination.CoordinationError) as caught:
+            vault_coordination.acquire(
+                manifest,
+                harness="codex",
+                owner="test-host",
+            )
+
+        self.assertEqual(caught.exception.status, "invalid-config")
+
 
 if __name__ == "__main__":
     unittest.main()
