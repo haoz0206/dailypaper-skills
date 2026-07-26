@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 from run_context import load_manifest, update_manifest
 from user_config import (
+    clear_config_cache,
     daily_papers_dir,
     load_user_config,
     repository_config,
@@ -135,6 +136,181 @@ def _write_state(path: Path, state: dict) -> None:
         encoding="utf-8",
     )
     temporary.replace(path)
+
+
+def _bootstrap_config() -> dict:
+    return {
+        "paths": {
+            "obsidian_vault": ".",
+        },
+        "runtime": {
+            "timezone": FIXED_TIMEZONE,
+        },
+        "repository": {
+            "url": FIXED_VAULT_URL,
+            "remote": FIXED_REMOTE,
+            "branch": FIXED_BRANCH,
+            "task_state_file": FIXED_TASK_STATE_FILE,
+            "pull_before_run": True,
+            "require_clean": True,
+            "coordination_enabled": True,
+            "lease_hours": 24,
+            "same_day_policy": "skip",
+        },
+    }
+
+
+def bootstrap_vault(vault: Path) -> dict:
+    """Create the first portable Vault commit without machine-local paths."""
+    vault = vault.expanduser().resolve()
+    top_level = Path(_git_output(vault, "rev-parse", "--show-toplevel")).resolve()
+    if top_level != vault:
+        raise CoordinationError(
+            "wrong-vault",
+            f"Bootstrap target is not the Git root: {vault}",
+        )
+
+    actual_url = _git_output(
+        vault,
+        "remote",
+        "get-url",
+        FIXED_REMOTE,
+    ).rstrip("/")
+    if actual_url != FIXED_VAULT_URL:
+        raise CoordinationError(
+            "wrong-remote",
+            f"Expected {FIXED_REMOTE}={FIXED_VAULT_URL}, found {actual_url}",
+        )
+    current_branch = _git_output(vault, "branch", "--show-current")
+    if current_branch != FIXED_BRANCH:
+        raise CoordinationError(
+            "wrong-branch",
+            f"Expected branch {FIXED_BRANCH}, found {current_branch or 'detached HEAD'}",
+        )
+    _ensure_clean(vault)
+
+    has_head = (
+        _git(vault, "rev-parse", "--verify", "HEAD", check=False).returncode == 0
+    )
+    if has_head:
+        _git(vault, "pull", "--ff-only", FIXED_REMOTE, FIXED_BRANCH)
+        _ensure_clean(vault)
+
+    gitignore_path = vault / ".gitignore"
+    existing_gitignore = (
+        gitignore_path.read_text(encoding="utf-8")
+        if gitignore_path.exists()
+        else ""
+    )
+    ignore_lines = existing_gitignore.splitlines()
+    if ".dailypaper/runs/" not in ignore_lines:
+        separator = (
+            ""
+            if not existing_gitignore or existing_gitignore.endswith("\n")
+            else "\n"
+        )
+        gitignore_path.write_text(
+            existing_gitignore
+            + separator
+            + "# Local daily-paper run state\n"
+            + ".dailypaper/runs/\n",
+            encoding="utf-8",
+        )
+
+    config_path = vault / ".dailypaper" / "config.json"
+    if config_path.exists():
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise CoordinationError(
+                "invalid-config",
+                f"Existing Vault config is not valid JSON: {exc}",
+            ) from exc
+        repository = config.get("repository", {})
+        expected = _bootstrap_config()["repository"]
+        for key in (
+            "url",
+            "remote",
+            "branch",
+            "task_state_file",
+            "pull_before_run",
+            "require_clean",
+            "coordination_enabled",
+            "same_day_policy",
+        ):
+            if key in repository and repository[key] != expected[key]:
+                raise CoordinationError(
+                    "invalid-config",
+                    f"Existing Vault config has incompatible repository.{key}",
+                )
+    else:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps(_bootstrap_config(), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    allowed = {
+        ".gitignore",
+        ".dailypaper/config.json",
+    }
+    unexpected = _dirty_paths(vault) - allowed
+    if unexpected:
+        raise CoordinationError(
+            "unexpected-changes",
+            "Vault contains changes outside bootstrap: "
+            + ", ".join(sorted(unexpected)),
+        )
+
+    _git(vault, "add", "--", ".gitignore")
+    _git(vault, "add", "--force", "--", ".dailypaper/config.json")
+    staged = _git_output(
+        vault,
+        "-c",
+        "core.quotePath=false",
+        "diff",
+        "--cached",
+        "--name-only",
+    )
+    if not staged:
+        return {
+            "status": "already-bootstrapped",
+            "vault": str(vault),
+            "branch": FIXED_BRANCH,
+        }
+
+    _git(
+        vault,
+        "-c",
+        f"user.name={COMMIT_NAME}",
+        "-c",
+        f"user.email={COMMIT_EMAIL}",
+        "commit",
+        "-m",
+        "dailypaper: bootstrap vault",
+    )
+    bootstrap_commit = _git_output(vault, "rev-parse", "HEAD")
+    push = _git(
+        vault,
+        "push",
+        "--set-upstream",
+        FIXED_REMOTE,
+        FIXED_BRANCH,
+        check=False,
+    )
+    if push.returncode != 0:
+        detail = push.stderr.strip() or push.stdout.strip()
+        raise CoordinationError(
+            "bootstrap-push-failed",
+            f"Bootstrap commit was preserved locally; push failed: {detail}",
+            exit_code=3,
+        )
+    return {
+        "status": "bootstrapped",
+        "vault": str(vault),
+        "branch": FIXED_BRANCH,
+        "bootstrap_commit": bootstrap_commit,
+    }
 
 
 def _repository_identity(vault: Path) -> tuple[dict, str]:
@@ -344,6 +520,8 @@ def acquire(
     vault = Path(manifest["paths"]["vault"]).resolve()
     config, remote = _repository_identity(vault)
     base_commit = _sync_before_run(vault, config, remote)
+    clear_config_cache()
+    config, remote = _repository_identity(vault)
 
     task_relative = _task_relative_path()
     task_path = vault / task_relative
@@ -715,6 +893,9 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    bootstrap_parser = subparsers.add_parser("bootstrap")
+    bootstrap_parser.add_argument("--vault", required=True, type=Path)
+
     acquire_parser = subparsers.add_parser("acquire")
     acquire_parser.add_argument("manifest", type=Path)
     acquire_parser.add_argument(
@@ -733,7 +914,9 @@ def main() -> None:
 
     args = parser.parse_args()
     try:
-        if args.command == "acquire":
+        if args.command == "bootstrap":
+            result = bootstrap_vault(args.vault)
+        elif args.command == "acquire":
             result = acquire(
                 args.manifest,
                 harness=args.harness,

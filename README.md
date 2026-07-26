@@ -12,7 +12,7 @@
 如果你也有“每天想看看新论文，但不想每天从一堆页面里手动捞”的痛苦，这个仓库大概就是为这种场景准备的。
 
 > **🧊 Codex / Humanoid 适配**
-> 想看 Codex 适配版的话，可以先看 [`codex+humanoid`](https://github.com/huangkiki/dailypaper-skills/tree/codex%2Bhumanoid) 分支。
+> 想看 Codex 适配版的话，可以先看 [`codex+humanoid`](https://github.com/haoz0206/dailypaper-skills/tree/codex%2Bhumanoid) 分支。
 
 > **🧩 顺手推荐**
 > 如果你主要在 Zotero 里读 PDF，可以搭配我另一个插件 [Zotero AI Sidebar](https://github.com/huangkiki/zotero-ai-sidebar)。这个插件是在 Zotero 右侧加一个 AI 侧栏，适合边读边问、点译、全文翻译、截图追问、写回 Zotero 笔记。
@@ -66,7 +66,7 @@
 最后在 Obsidian 里大概会长这样：
 
 ```text
-ObsidianVault/
+/workspace/dailypaper-vault/        # 服务器上的本机固定路径示例
 ├── .dailypaper/
 │   ├── config.json
 │   ├── tasks/
@@ -126,28 +126,41 @@ ObsidianVault/
 - [`poppler-utils`](https://poppler.freedesktop.org/)，macOS 可以 `brew install poppler`
 - [Zotero](https://www.zotero.org/)，可选，但如果你已经用 Zotero 管论文会很方便
 
-把 skills 复制到 Claude Code 的 skills 目录：
+服务器上的本机约定是：
+
+```text
+/workspace/dailypaper-skills
+/workspace/dailypaper-vault
+```
+
+首次部署并把 skills 复制到 Claude Code 的用户级目录：
 
 ```bash
-git clone https://github.com/huangkiki/dailypaper-skills.git
-cd dailypaper-skills
+git clone --branch main \
+  git@github.com:haoz0206/dailypaper-skills.git \
+  /workspace/dailypaper-skills
+git clone \
+  git@github.com:haoz0206/dailypaper-vault.git \
+  /workspace/dailypaper-vault
+
+export DAILYPAPER_VAULT=/workspace/dailypaper-vault
+export DAILYPAPER_CONFIG=/workspace/dailypaper-vault/.dailypaper/config.json
+
+python3 /workspace/dailypaper-skills/skills/_shared/vault_coordination.py \
+  bootstrap --vault /workspace/dailypaper-vault
 
 mkdir -p ~/.claude/skills
-cp -r ./skills/* ~/.claude/skills/
+cp -R /workspace/dailypaper-skills/skills/. ~/.claude/skills/
 ```
 
-克隆固定的远程 Vault，并准备目录：
+`bootstrap` 可以安全重复执行。对于当前这样的空 Vault 远程，它会创建并推送首个
+`main` 提交，其中只有可移植的 `.dailypaper/config.json` 和忽略本地 run manifest
+的 `.gitignore`；已有初始化提交时，它先 `pull --ff-only`，再只补齐缺失文件。
 
-```bash
-git clone git@github.com:haoz0206/dailypaper-vault.git ~/dailypaper-vault
-VAULT=~/dailypaper-vault
-
-mkdir -p "$VAULT/DailyPapers" \
-  "$VAULT/论文笔记/_概念/0-待分类" \
-  "$VAULT/论文笔记/_待整理"
-
-export DAILYPAPER_VAULT="$VAULT"
-```
+`/workspace/dailypaper-vault` 是 per-machine 配置：把这两个环境变量写进定时任务或
+服务环境，不要把绝对路径提交到 Vault。已跟踪配置保持
+`paths.obsidian_vault = "."`，Mac 可以 clone 到别的目录而不改变协调指纹。
+非交互式任务还需要能使用服务器上的 GitHub SSH key。
 
 我自己在本地日常用的时候，通常会这样启动 Claude Code：
 
@@ -168,6 +181,7 @@ claude --dangerously-skip-permissions
 推荐把共享配置提交到 Vault 的 `.dailypaper/config.json`，并在定时环境中设置：
 
 ```bash
+export DAILYPAPER_VAULT=/workspace/dailypaper-vault
 export DAILYPAPER_CONFIG="$DAILYPAPER_VAULT/.dailypaper/config.json"
 ```
 
@@ -244,11 +258,12 @@ Zotero AI Sidebar 更适合在读 PDF 的时候用：
 
 完整日报运行前会：
 
-1. 验证 Vault 的 `origin` 是
+1. 幂等执行一次 bootstrap；空远程会建立 `main`、可移植配置和 run ignore。
+2. 验证 Vault 的 `origin` 是
    `git@github.com:haoz0206/dailypaper-vault.git`，当前分支是 `main`。
-2. 要求工作树干净并执行 `git pull --ff-only origin main`。
-3. 检查当天输出和 `.dailypaper/tasks/daily-papers.json`。
-4. 用独立 acquisition commit/push 原子取得任务所有权。
+3. 要求工作树干净并执行 `git pull --ff-only origin main`，随后重新加载配置。
+4. 检查当天输出和 `.dailypaper/tasks/daily-papers.json`。
+5. 用独立 acquisition commit/push 原子取得任务所有权。
 
 只有抢锁 push 成功的 harness 才会继续。另一个 Claude Code/Codex 任务如果同时启动，
 普通 push 会被拒绝并立即停止，不会 rebase、force push 或覆盖同日内容。
@@ -311,9 +326,9 @@ obsidian-templates/
 
 ## 支持这个项目
 
-如果这套 workflow 对你有帮助，欢迎点 Star、提 PR，或者分享你的适配版本。像 [`codex+humanoid`](https://github.com/huangkiki/dailypaper-skills/tree/codex%2Bhumanoid) 这种兼容性适配也很欢迎。
+如果这套 workflow 对你有帮助，欢迎点 Star、提 PR，或者分享你的适配版本。像 [`codex+humanoid`](https://github.com/haoz0206/dailypaper-skills/tree/codex%2Bhumanoid) 这种兼容性适配也很欢迎。
 
-[![Star History Chart](https://api.star-history.com/svg?repos=huangkiki/dailypaper-skills&type=Date)](https://www.star-history.com/#huangkiki/dailypaper-skills&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=haoz0206/dailypaper-skills&type=Date)](https://www.star-history.com/#haoz0206/dailypaper-skills&Date)
 
 ## License
 

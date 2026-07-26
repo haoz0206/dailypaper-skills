@@ -341,6 +341,152 @@ class VaultCoordinationTests(unittest.TestCase):
 
         self.assertEqual(caught.exception.status, "invalid-config")
 
+    def test_bootstrap_initializes_an_empty_remote(self) -> None:
+        empty_remote = self.root / "empty.git"
+        empty_vault = self.root / "empty-vault"
+        subprocess.run(
+            [
+                "git",
+                "init",
+                "--bare",
+                "--initial-branch=main",
+                str(empty_remote),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "clone", str(empty_remote), str(empty_vault)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        with patch.object(
+            vault_coordination,
+            "FIXED_VAULT_URL",
+            str(empty_remote),
+        ):
+            result = vault_coordination.bootstrap_vault(empty_vault)
+            repeated = vault_coordination.bootstrap_vault(empty_vault)
+
+        self.assertEqual(result["status"], "bootstrapped")
+        self.assertEqual(repeated["status"], "already-bootstrapped")
+        self.assertEqual(git(empty_vault, "status", "--porcelain"), "")
+        self.assertIn(
+            ".dailypaper/runs/",
+            (empty_vault / ".gitignore").read_text(encoding="utf-8"),
+        )
+        config = json.loads(
+            (
+                empty_vault / ".dailypaper" / "config.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(config["paths"]["obsidian_vault"], ".")
+        self.assertEqual(config["repository"]["branch"], "main")
+
+        run_state = (
+            empty_vault
+            / ".dailypaper"
+            / "runs"
+            / "local-only"
+            / "manifest.json"
+        )
+        run_state.parent.mkdir(parents=True)
+        run_state.write_text("{}\n", encoding="utf-8")
+        self.assertEqual(git(empty_vault, "status", "--porcelain"), "")
+
+    def test_acquire_reloads_vault_config_after_pull(self) -> None:
+        vault_config = self.vault / ".dailypaper" / "config.json"
+        vault_config.parent.mkdir(parents=True)
+        initial_config = json.loads(
+            self.config_path.read_text(encoding="utf-8")
+        )
+        initial_config["paths"]["obsidian_vault"] = "."
+        vault_config.write_text(
+            json.dumps(initial_config, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        git(self.vault, "add", ".dailypaper/config.json")
+        git(
+            self.vault,
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "add vault config",
+        )
+        git(self.vault, "push", "origin", "main")
+
+        with patch.dict(
+            os.environ,
+            {
+                "DAILYPAPER_CONFIG": str(vault_config),
+            },
+            clear=False,
+        ):
+            user_config.clear_config_cache()
+            manifest = self._manifest()
+
+            updater = self.root / "config-updater"
+            subprocess.run(
+                ["git", "clone", str(self.remote), str(updater)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            updated_config = json.loads(
+                (updater / ".dailypaper" / "config.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            updated_config["daily_papers"]["top_n"] = 29
+            (updater / ".dailypaper" / "config.json").write_text(
+                json.dumps(
+                    updated_config,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            git(updater, "add", ".dailypaper/config.json")
+            git(
+                updater,
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "update vault config",
+            )
+            git(updater, "push", "origin", "main")
+
+            result = vault_coordination.acquire(
+                manifest,
+                harness="claude-code",
+                owner="test-host",
+            )
+            state = json.loads(
+                (
+                    self.vault
+                    / ".dailypaper"
+                    / "tasks"
+                    / "daily-papers.json"
+                ).read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(result["status"], "acquired")
+        self.assertEqual(user_config.daily_papers_config()["top_n"], 29)
+        self.assertEqual(
+            state["config_sha256"],
+            vault_coordination._config_fingerprint(),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

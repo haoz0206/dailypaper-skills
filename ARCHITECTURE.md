@@ -9,28 +9,41 @@
     │
     ├─ "今日论文推荐" ──→ daily-papers（编排器）
     │                        ├─ Step 1: daily-papers-fetch（Python，零 token）
-    │                        ├─ Step 2: daily-papers-review（Claude 点评）
-    │                        └─ Step 3: daily-papers-notes（Claude + paper-reader）
+    │                        ├─ Step 2: daily-papers-review（当前 agent 点评）
+    │                        └─ Step 3: daily-papers-notes（当前 agent + paper-reader）
     │
-    ├─ "读一下这篇论文" ──→ paper-reader（独立 fork）
+    ├─ "读一下这篇论文" ──→ paper-reader（独立 skill）
     │
     └─ "更新索引" ──→ generate-mocs（Python 脚本）
 ```
 
-三步流水线的设计主要是为了控制单次上下文长度。每步之间通过 `/tmp` 下的 JSON 文件传数据。
+三步流水线的设计主要是为了控制单次上下文长度。入口首先创建独立
+`RunManifest`，三个阶段通过 manifest 中的运行级 JSON 路径传递数据，避免并发和失败
+重跑读到其他任务的文件。
+
+服务器上的 Vault 使用本机固定路径 `/workspace/dailypaper-vault`，通过
+`DAILYPAPER_VAULT` 注入。这个绝对路径不写入共享配置；Vault 内跟踪的
+`.dailypaper/config.json` 使用相对值 `"."`，从而允许 Mac、服务器和其他 harness
+在不同 clone 路径上共享同一配置指纹。
+
+首次运行前，`vault_coordination.py bootstrap` 会处理空远程：验证固定
+`origin`、`main` 和干净工作树，创建可移植配置及忽略 `.dailypaper/runs/` 的
+`.gitignore`，生成首个初始化提交并普通 push。已有提交时该命令先 fast-forward
+pull，并且只有缺失 bootstrap 文件时才再提交，所以可幂等调用。
 
 ---
 
 ## Step 1: daily-papers-fetch
 
-**纯 Python，不消耗 Claude token。**
+**纯 Python，不消耗模型 token。**
 
 ### 1.1 抓取 + 打分（fetch_and_score.py）
 
 数据源：
 - HuggingFace Daily Papers API：`https://huggingface.co/api/daily_papers?date=YYYY-MM-DD`
 - HuggingFace Trending API：`https://huggingface.co/api/daily_papers?sort=trending`
-- arXiv API：`https://export.arxiv.org/api/query`，搜索 `cs.RO, cs.CV, cs.AI, cs.LG`
+- arXiv API：`https://export.arxiv.org/api/query`，分类来自
+  `daily_papers.arxiv_categories` 配置
 
 打分规则：
 - 命中 `negative_keywords` → 直接 -999 排除
@@ -45,7 +58,7 @@
 - 多天模式（days > 1）：跳过历史去重
 - 候选不足 20 篇时从历史回补
 
-输出：`/tmp/daily_papers_top30.json`
+输出：`{RUN_DIR}/candidates.json`
 
 ### 1.2 元数据富化（enrich_papers.py）
 
@@ -56,21 +69,21 @@
 - HTML 取不到时 fallback 到 `pdftotext` 提取机构
 - 再 fallback 到 arXiv abs 页面的 `<meta>` 标签
 
-输出：`/tmp/daily_papers_enriched.json`
+输出：`{RUN_DIR}/enriched.json`
 
 ---
 
 ## Step 2: daily-papers-review
 
-**Claude 主导，读候选列表写点评。**
+**当前 agent 主导，读候选列表写点评。**
 
 ### 2.1 扫描已有笔记
 
-Glob 扫描 Obsidian 的论文笔记和概念库目录，把候选论文跟已有笔记做匹配（方法名 / 标题模糊匹配），标记 `has_existing_note`。
+扫描 Obsidian 的论文笔记和概念库目录，把候选论文跟已有笔记做匹配（方法名 / 标题模糊匹配），标记 `has_existing_note`。
 
 ### 2.2 写锐评
 
-Claude 以"毒舌但有料的资深研究员"角色点评每篇论文：
+当前 agent 以"毒舌但有料的资深研究员"角色点评每篇论文：
 - 分流表：🔥 必读 / 👀 值得看 / 💤 可跳过
 - 每篇包含：作者、机构、链接、来源、核心方法（带 `[[概念]]` 链接）、对比方法、借鉴意义、锐评
 - 已有笔记的论文走简化格式
@@ -85,13 +98,13 @@ Claude 以"毒舌但有料的资深研究员"角色点评每篇论文：
 
 - 写入 `{DAILY_PAPERS_PATH}/YYYY-MM-DD-论文推荐.md`
 - 更新 `.history.json`：追加今日推荐的 arXiv ID + 标题，只保留最近 30 天
-- 可选：git commit
+- 将变更路径加入当前 run；不在本阶段提交
 
 ---
 
 ## Step 3: daily-papers-notes
 
-**Claude 编排 + 多次调用 paper-reader。**
+**当前 agent 编排 + 多次调用 paper-reader。**
 
 ### 3.1 概念库补充
 
@@ -122,27 +135,29 @@ Claude 以"毒舌但有料的资深研究员"角色点评每篇论文：
 - 调用 `generate_concept_mocs.py` 和 `generate_paper_mocs.py`
 - 全部验证成功后，由 `vault_coordination.py` 创建一次精确暂存的内容 commit/push
 - acquisition commit 在抓取开始前已经取得跨机器任务所有权
+- acquisition 前的 pull 完成后会清除配置缓存并重新读取 Vault 配置，避免锁指纹
+  使用 pull 前的旧值
 
 ---
 
 ## paper-reader
 
-**独立 fork 运行，完整工具链（Bash / Read / Write / Edit / WebFetch / WebSearch）。**
+**作为独立 Skill 运行，使用宿主当前可用的文件、命令和网络能力。**
 
 ### 输入源
 
 | 来源 | 处理方式 |
 |------|----------|
-| arXiv 链接 | WebFetch 抓取 |
+| arXiv 链接 | 优先获取 arXiv HTML，必要时下载 PDF |
 | 本地 PDF | 直接读取 |
 | Zotero 搜索 | 查 DB → 定位 PDF / 在线源 |
 | Zotero 分类批量 | 递归子分类 → 去重 → 逐篇处理 |
 
 找不到 PDF 时的 fallback 顺序：
-1. `zotero_helper.py info` 拿元数据
-2. 提取 arXiv ID → WebFetch HTML 版本（优先，能拿图）
-3. Fallback：PDF 版本 / DOI 页面
-4. 最后：WebSearch 论文标题
+1. arXiv URL 直接获取 HTML 版本（优先，能拿图），不访问 Zotero
+2. 明确的 Zotero 输入才用 `zotero_helper.py info` 定位元数据和本地 PDF
+3. Fallback：arXiv PDF / DOI 页面
+4. 最后：通过 arXiv API 或可用搜索能力检索论文标题
 5. 都不行 → 跳过
 
 ### 阅读模式
@@ -171,9 +186,10 @@ Claude 以"毒舌但有料的资深研究员"角色点评每篇论文：
 
 ### 存储
 
-- 路径：`{NOTES_PATH}/{zotero_collection_path}/{MethodName}.md`
-- 不确定分类 → `_待整理/`
-- YAML frontmatter：title / method_name / authors / year / venue / tags / zotero_collection / image_source / created
+- Zotero 输入：`{NOTES_PATH}/{zotero_collection_path}/{MethodName}.md`
+- 非 Zotero 输入：根据主题分类，无法判断时写入 `{INBOX_PATH}/`
+- 默认未分类目录为 `_待整理/`
+- YAML frontmatter：title / method_name / authors / year / venue / tags / 可选 zotero_collection / image_source / created
 
 ### 概念库维护
 
@@ -190,8 +206,8 @@ python3 paper_daemon.py --status     # 查看进度
 python3 paper_daemon.py --list       # 列出所有分类
 ```
 
-- API 限流：指数退避（60s → 最大 12h）
-- 配额监控：每 3 篇检查一次，> 85% 自动等待
+- API 限流：指数退避（60s → 最大 6h）
+- 配额限制：优先解析 Codex 返回的重置时间；无法解析时默认等待 30 分钟
 - 断点续跑：checkpoint 持久化
 - 进程锁：防止并发
 - 自动跳过已有笔记（> 100 行）
@@ -210,7 +226,7 @@ python3 paper_daemon.py --list       # 列出所有分类
 - 用 wikilink 格式
 
 分两个入口：
-- `generate_concept_mocs.py`：扫描概念库（`_概念/`）
+- `generate_concept_mocs.py`：扫描配置中的概念库目录（默认 `_概念/`）
 - `generate_paper_mocs.py`：扫描论文笔记（排除概念目录）
 
 ---
@@ -310,6 +326,6 @@ MOC 生成引擎，被 `generate_concept_mocs.py` 和 `generate_paper_mocs.py` �
 │   │   │   └── Diffusion Policy.md
 │   │   ├── ... (共 16 个分类)
 │   │   └── 0-待分类/
-│   └── _待整理/                     # 无法自动归类的论文
+│   └── _待整理/                    # 无法自动归类的论文
 └── ...
 ```

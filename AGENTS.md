@@ -50,10 +50,17 @@ permission flags, and host tool wording in the harness adapter.
   configuration supported by the current adapter.
 - Zotero is optional. Do not access its SQLite database for ordinary arXiv or
   local-PDF inputs.
+- The persistent Linux server stores its Vault clone at
+  `/workspace/dailypaper-vault`. Treat this as per-machine environment
+  configuration (`DAILYPAPER_VAULT`), not a tracked absolute path.
 - Resolve scripts from the Skill location, not the caller's current directory.
 - Do not use shared fixed temporary filenames.
-- Git automation should stage only files written by the current run. The target
-  contract is at most one daily commit and an opt-in push.
+- Bootstrap may create one initialization commit for an empty Vault. A full
+  coordinated daily run then creates one acquisition commit and at most one
+  content commit, both with ordinary pushes. Standalone helper pushes remain
+  opt-in.
+- Git automation must stage only bootstrap files or paths written by the current
+  run. Never use force push or automatic rebase for Vault coordination.
 
 ## Branch maintenance
 

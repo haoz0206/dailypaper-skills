@@ -51,6 +51,17 @@ Research interests belong in shared or local configuration, never in a harness
 adapter. Machine-local paths may differ, but all output-affecting configuration
 must produce the same configuration fingerprint for a coordinated run.
 
+On the persistent Linux server, the per-machine Vault location is:
+
+```text
+/workspace/dailypaper-vault
+```
+
+Set that value through `DAILYPAPER_VAULT` in the scheduler or service
+environment. The tracked Vault configuration keeps `paths.obsidian_vault` as
+`.`; absolute clone locations are deliberately excluded from the stable
+configuration fingerprint. Other machines may use another absolute clone path.
+
 The coordinated Vault repository is fixed to:
 
 ```text
@@ -137,21 +148,27 @@ fingerprint, and expected daily output.
 
 Every full daily run must:
 
-1. Create an isolated local run manifest.
-2. Verify that the configured Vault is the Git root, `origin` matches the fixed
+1. Idempotently bootstrap the Vault before creating local run state. Bootstrap
+   verifies the Git root, fixed remote, and `main`; initializes an empty remote
+   with a portable `.dailypaper/config.json` and `.gitignore`; otherwise it
+   fast-forward pulls and only adds missing bootstrap files.
+2. Create an isolated local run manifest under ignored
+   `.dailypaper/runs/<run-id>/`.
+3. Verify that the configured Vault is the Git root, `origin` matches the fixed
    repository, the current branch is `main`, and the worktree is clean.
-3. Run `git pull --ff-only origin main`.
-4. Stop successfully if the target day's recommendation already exists.
-5. Stop without writing if another `running` task owns the document.
-6. Write its own `running` state in an isolated candidate clone and push that
+4. Run `git pull --ff-only origin main`, then discard any cached configuration
+   and reload the post-pull Vault configuration.
+5. Stop successfully if the target day's recommendation already exists.
+6. Stop without writing if another `running` task owns the document.
+7. Write its own `running` state in an isolated candidate clone and push that
    acquisition commit.
-7. Continue only when that ordinary push succeeds. A non-fast-forward rejection
+8. Continue only when that ordinary push succeeds. A non-fast-forward rejection
    means another runner won.
-8. Generate and validate outputs without independent Git commits.
-9. Before publication, fetch and verify that the remote HEAD is still the
-   acquisition commit, the task document still contains the same run ID, and
-   the stable configuration fingerprint is unchanged.
-10. Publish the task's `success` state and exactly the manifest's changed paths
+9. Generate and validate outputs without independent Git commits.
+10. Before publication, fetch and verify that the remote HEAD is still the
+    acquisition commit, the task document still contains the same run ID, and
+    the stable configuration fingerprint is unchanged.
+11. Publish the task's `success` state and exactly the manifest's changed paths
     in one content commit with an ordinary push.
 
 Acquisition or publication failure must never trigger force push, automatic
@@ -160,6 +177,10 @@ rebase, lock stealing, or content regeneration. A crashed run leaves a visible
 
 Per-run intermediate files remain under ignored `.dailypaper/runs/`. The task
 document is tracked and is part of the coordination interface.
+
+Bootstrap is the only first-run exception to the normal two-commit daily
+protocol. It creates at most one reviewed initialization commit and preserves a
+local commit if its ordinary push fails.
 
 ## Publication result
 

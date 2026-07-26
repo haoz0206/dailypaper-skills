@@ -24,7 +24,17 @@ description: |
 2. 将本 `SKILL.md` 所在目录的父目录解析为绝对路径 `SKILLS_ROOT`。所有脚本和内部
    Skill 都从 `SKILLS_ROOT` 解析，禁止依赖当前工作目录。
 3. 读取共享配置并确定 `VAULT_PATH` 和 `TIMEZONE = runtime.timezone`。
-4. 使用以下命令创建本次运行的独立 manifest，并记住返回的绝对路径
+4. 在创建任何本地 run 文件前，幂等初始化并同步 Vault：
+
+   ```bash
+   python3 "{SKILLS_ROOT}/_shared/vault_coordination.py" bootstrap \
+     --vault "{VAULT_PATH}"
+   ```
+
+   这一步会验证固定远程、`main` 和干净工作树。空远程会得到首个可移植配置提交；
+   已初始化 Vault 会 fast-forward pull，并只在缺少 bootstrap 文件时提交。任何
+   非零状态都必须停止，不能在脏工作树或错误远程上继续。
+5. 使用以下命令创建本次运行的独立 manifest，并记住返回的绝对路径
    `RUN_MANIFEST`：
 
    ```bash
@@ -32,7 +42,7 @@ description: |
      --date YYYY-MM-DD --timezone "{TIMEZONE}"
    ```
 
-5. 在抓取论文前，必须通过确定性协调器同步远程 Vault 并取得任务所有权：
+6. 在抓取论文前，必须通过确定性协调器同步远程 Vault 并取得任务所有权：
 
    ```bash
    python3 "{SKILLS_ROOT}/_shared/vault_coordination.py" acquire \
@@ -46,13 +56,13 @@ description: |
    - 返回 `already-completed`：当天任务已由任一 harness 完成，直接结束。
    - 返回 `locked`、`lock-raced`、`dirty-worktree`、`wrong-remote` 或其他非零状态：
      停止运行，不得绕过、rebase、force push 或重新生成。
-6. 按顺序读取并执行以下内部阶段文件，把同一个 `RUN_MANIFEST` 传给每个阶段：
+7. 按顺序读取并执行以下内部阶段文件，把同一个 `RUN_MANIFEST` 传给每个阶段：
    - `{SKILLS_ROOT}/daily-papers-fetch/SKILL.md`
    - `{SKILLS_ROOT}/daily-papers-review/SKILL.md`
    - `{SKILLS_ROOT}/daily-papers-notes/SKILL.md`
-7. 只有三个阶段全部验证成功后，才允许 notes 阶段调用协调器完成一次内容
+8. 只有三个阶段全部验证成功后，才允许 notes 阶段调用协调器完成一次内容
    commit/push，并把任务状态更新为 `success`。
-8. 如果取得所有权后任一阶段失败，且当前仍持有远程锁，运行：
+9. 如果取得所有权后任一阶段失败，且当前仍持有远程锁，运行：
 
    ```bash
    python3 "{SKILLS_ROOT}/_shared/vault_coordination.py" fail \
@@ -61,7 +71,7 @@ description: |
 
    失败状态必须推送到远程；未完成的本地输出不得发布。进程崩溃留下的
    `running` 状态不得自动抢占，需要人工检查后处理。
-9. 全部完成后，用一句话告诉用户：
+10. 全部完成后，用一句话告诉用户：
    - 推荐文件已生成
    - 重点论文笔记已生成多少篇
    - 目录页是否已自动刷新
