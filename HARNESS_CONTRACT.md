@@ -1,9 +1,11 @@
 # Harness-independent workflow contract
 
 This document defines the user-visible interface shared by the Claude Code and
-Codex adapters. Harness branches may change discovery metadata, installation
-paths, permission syntax, and internal Skill-to-Skill invocation. They must not
-change the inputs and outputs below.
+Codex adapters. The unified branch stores both adapters in one checkout:
+portable `SKILL.md` frontmatter for both harnesses and Codex
+`agents/openai.yaml` metadata beside it. Runtime adapters may change explicit
+invocation syntax and CLI flags, but must not change the inputs and outputs
+below.
 
 ## Canonical inputs
 
@@ -71,6 +73,10 @@ git@github.com:haoz0206/dailypaper-vault.git
 Both adapters use remote `origin`, branch `main`, and IANA timezone
 `Asia/Shanghai` by default. They must reject a different remote or branch rather
 than silently publishing elsewhere.
+
+Before acquisition, the Skill sets the task state's harness identity from the
+current host: `claude-code` for Claude Code and `codex` for Codex. Harness
+identity is runtime metadata; it does not select a skills Git branch.
 
 `automation.git_commit` and `automation.git_push` control standalone helper
 Skills only. A full daily run always uses the acquisition and publication
@@ -192,7 +198,7 @@ Git automation has the same observable result on both harnesses:
 4. Create at most one content commit for the run.
 5. Push both commits without force.
 
-## Allowed adapter differences
+## Allowed runtime adapter differences
 
 - Skill discovery directory and metadata.
 - Explicit invocation syntax.
@@ -201,13 +207,12 @@ Git automation has the same observable result on both harnesses:
 - Internal orchestration used to reach the shared workflow.
 
 Changes to default research keywords, output directories, note templates,
-scoring rules, or generated Markdown require a shared workflow change and
-should be applied to both branches.
+scoring rules, or generated Markdown require a shared workflow change in the
+single unified branch.
 
 ## Adapter validation
 
-Codex adapters keep valid `agents/openai.yaml` metadata. Claude Code adapters
-keep valid Claude discovery paths, invocation syntax, and any Claude-specific
-frontmatter or tool permissions. Those adapters call the same Python run
-context and Vault coordination scripts; they do not reimplement Git safety in
-natural-language instructions.
+Every Skill keeps frontmatter accepted by both harnesses and valid
+`agents/openai.yaml` metadata for Codex. Claude Code ignores the Codex metadata.
+Both adapters call the same Python run context and Vault coordination scripts;
+they do not reimplement Git safety in natural-language instructions.

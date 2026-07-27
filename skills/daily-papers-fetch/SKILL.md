@@ -42,7 +42,8 @@ description: |
 - 所有关键词、分类、阈值都以共享配置为准
 - `CANDIDATES_OUTPUT` 和 `ENRICHED_OUTPUT` 必须从 `RUN_MANIFEST.paths` 读取
 
-如果父流程没有提供 `RUN_MANIFEST`，先运行：
+如果父流程没有提供 `RUN_MANIFEST`，先根据当前宿主设置 `HARNESS_ID`（Claude Code
+使用 `claude-code`，Codex 使用 `codex`），再运行：
 
 ```bash
 python3 "{SKILLS_ROOT}/_shared/run_context.py" create \
@@ -55,7 +56,7 @@ python3 "{SKILLS_ROOT}/_shared/run_context.py" create \
 
 ```bash
 python3 "{SKILLS_ROOT}/_shared/vault_coordination.py" acquire \
-  "{RUN_MANIFEST}" --harness claude-code
+  "{RUN_MANIFEST}" --harness "{HARNESS_ID}"
 ```
 
 如果父流程已经提供 manifest，则确认 `RUN_MANIFEST.coordination.status` 是
@@ -158,8 +159,8 @@ python3 "{SKILLS_ROOT}/daily-papers/enrich_papers.py" \
 
 ## 注意事项
 
-- Phase 1+2 使用 `fetch_and_score.py` 脚本，由当前 Claude Code 会话直接执行，零 token 消耗
-- Phase 3 使用 `enrich_papers.py` 脚本，同样由当前 Claude Code 会话直接执行
+- Phase 1+2 使用 `fetch_and_score.py` 脚本，由当前会话直接执行，零 token 消耗
+- Phase 3 使用 `enrich_papers.py` 脚本，同样由当前会话直接执行
 - 如果脚本执行失败，检查 stderr 输出诊断问题
 - 如果 arXiv API 抓取失败，脚本自动 fallback 到仅 HuggingFace 源
 - 如果总论文数不足 20 篇，有多少处理多少

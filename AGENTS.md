@@ -3,9 +3,9 @@
 ## Purpose
 
 `dailypaper-skills` is a harness-independent workflow for discovering, reviewing,
-and reading academic papers into an Obsidian Vault. Claude Code and Codex use
-different adapters, but should expose the same daily prompts and stable Vault
-outputs.
+and reading academic papers into an Obsidian Vault. The unified branch carries
+Claude Code and Codex discovery metadata together and exposes the same daily
+prompts and stable Vault outputs from one checkout.
 
 ## Stable user interface
 
@@ -64,13 +64,14 @@ permission flags, and host tool wording in the harness adapter.
 
 ## Branch maintenance
 
-- `main` is the Claude Code adapter.
-- Codex branches add Codex discovery metadata and runtime behavior.
-- When a stable input, output, template, scoring rule, or default research
-  setting changes, apply the change to both adapters.
-- Each branch README must state both shared behavior and known adapter
-  differences. Do not describe a target contract as already implemented when a
-  branch still has a documented gap.
+- The unified branch contains portable `SKILL.md` files plus Codex
+  `agents/openai.yaml` metadata in the same Skill directories.
+- Harness identity is selected at runtime (`claude-code` or `codex`), never by
+  switching the skills Git branch.
+- Keep stable inputs, outputs, templates, scoring rules, and default research
+  settings in one shared implementation.
+- README must state the remaining runtime adapter differences without implying
+  that users need separate branches.
 
 ## Validation
 

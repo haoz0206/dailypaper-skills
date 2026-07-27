@@ -57,7 +57,7 @@ description: |
 
 ### Phase 4: 扫描 Obsidian 笔记库索引 + 匹配已有论文笔记
 
-由当前 Claude Code 会话直接完成，使用可用的文件扫描和读取能力检查 Obsidian 笔记库：
+由当前 harness 会话直接完成，使用可用的文件扫描和读取能力检查 Obsidian 笔记库：
 
 1. 扫描 `{NOTES_PATH}/` 下所有分类目录（跳过 `_` 开头但保留
    `{INBOX_PATH}`），列出每个分类下的 `.md` 文件名
@@ -78,7 +78,7 @@ description: |
 
 ### Phase 5: 毒舌点评
 
-**当前 Claude Code 会话自己就是点评者。**
+**当前 harness 会话自己就是点评者。**
 
 基于富化后的论文数据 + 笔记库索引，直接生成点评：
 

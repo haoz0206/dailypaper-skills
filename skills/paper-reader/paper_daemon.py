@@ -4,7 +4,7 @@ Paper Reading Daemon - 后台论文阅读守护进程
 
 功能：
 1. 从 Zotero 获取指定分类的论文列表（递归子分类）
-2. 调用 Claude Code 逐篇处理
+2. 调用配置的 Claude Code 或 Codex 逐篇处理
 3. 遇到 rate limit 时自动等待并重试
 4. 支持断点续传
 
@@ -21,8 +21,10 @@ import os
 import sys
 import json
 import sqlite3
+import shlex
 import subprocess
 import shutil
+import tempfile
 import time
 import argparse
 import logging
@@ -36,7 +38,14 @@ _SHARED_DIR = Path(__file__).resolve().parents[1] / "_shared"
 if str(_SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(_SHARED_DIR))
 
-from user_config import concepts_dir, obsidian_vault_path, paper_notes_dir, zotero_db_path, zotero_storage_dir, temp_file_path
+from user_config import (
+    concepts_dir,
+    obsidian_vault_path,
+    paper_inbox_dir,
+    paper_notes_dir,
+    zotero_db_path,
+    zotero_storage_dir,
+)
 
 # 配置
 ZOTERO_DB = str(zotero_db_path())
@@ -44,10 +53,39 @@ ZOTERO_STORAGE = str(zotero_storage_dir())
 OBSIDIAN_VAULT = str(obsidian_vault_path())
 PAPER_NOTES_ROOT = str(paper_notes_dir())
 CONCEPTS_ROOT = str(concepts_dir())
-_DAEMON_STATE_DIR = os.path.expanduser(os.environ.get("PAPER_DAEMON_STATE_DIR", "~/.claude"))
+INBOX_ROOT = str(paper_inbox_dir())
+_XDG_STATE_HOME = Path(
+    os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")
+).expanduser()
+_DAEMON_STATE_DIR = str(
+    Path(
+        os.environ.get(
+            "PAPER_DAEMON_STATE_DIR",
+            _XDG_STATE_HOME / "dailypaper",
+        )
+    ).expanduser().resolve()
+)
+_DAEMON_HARNESS = os.environ.get("PAPER_DAEMON_HARNESS", "auto").strip().lower()
+_DAEMON_WORKDIR = os.environ.get("PAPER_DAEMON_WORKDIR", OBSIDIAN_VAULT)
+_CODEX_BIN = os.environ.get("PAPER_DAEMON_CODEX_BIN", "codex")
+_CODEX_MODEL = os.environ.get("PAPER_DAEMON_CODEX_MODEL", "").strip()
+_CODEX_EXTRA_ARGS = os.environ.get("PAPER_DAEMON_CODEX_ARGS", "")
+_CODEX_SEARCH = os.environ.get("PAPER_DAEMON_CODEX_SEARCH", "").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+_CLAUDE_BIN = os.environ.get("PAPER_DAEMON_CLAUDE_BIN", "claude")
+_CLAUDE_MODEL = os.environ.get("PAPER_DAEMON_CLAUDE_MODEL", "").strip()
+_CLAUDE_EXTRA_ARGS = os.environ.get("PAPER_DAEMON_CLAUDE_ARGS", "")
+_CLAUDE_PERMISSION_MODE = os.environ.get(
+    "PAPER_DAEMON_CLAUDE_PERMISSION_MODE",
+    "acceptEdits",
+)
 PROGRESS_FILE = os.path.join(_DAEMON_STATE_DIR, "paper_daemon_progress.json")
 LOG_FILE = os.path.join(_DAEMON_STATE_DIR, "paper_daemon.log")
 PID_FILE = os.path.join(_DAEMON_STATE_DIR, "paper_daemon.pid")
+_DAEMON_TEMP_DIR = tempfile.TemporaryDirectory(prefix="paper-daemon-")
 
 # Rate limit 配置
 INITIAL_WAIT = 60          # 初始等待时间（秒）
@@ -56,17 +94,24 @@ WAIT_MULTIPLIER = 2        # 等待时间倍数
 BETWEEN_PAPERS_WAIT = 5    # 论文之间的等待时间（秒）
 QUOTA_WAIT_TIME = 1800     # 命中配额上限时的默认等待时间（30分钟）
 
-# 设置日志
-os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler()
-    ]
-)
 logger = logging.getLogger(__name__)
+
+
+def configure_logging() -> None:
+    """Configure daemon logging lazily, avoiding import-time file writes."""
+    if getattr(logger, "_dailypaper_configured", False):
+        return
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    file_handler = logging.FileHandler(LOG_FILE)
+    file_handler.setFormatter(formatter)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    logger.setLevel(logging.INFO)
+    logger.addHandler(file_handler)
+    logger.addHandler(stream_handler)
+    logger.propagate = False
+    logger._dailypaper_configured = True
 
 _SUBSCRIPT_TRANSLATION = str.maketrans("₀₁₂₃₄₅₆₇₈₉₊₋", "0123456789+-")
 _GREEK_REPLACEMENTS = {
@@ -160,7 +205,7 @@ def parse_reset_wait_seconds(message: str) -> Optional[int]:
 
 def copy_zotero_db() -> str:
     """复制 Zotero 数据库以避免锁定"""
-    tmp_db = str(temp_file_path("zotero_readonly.sqlite"))
+    tmp_db = str(Path(_DAEMON_TEMP_DIR.name) / "zotero_readonly.sqlite")
     shutil.copy(ZOTERO_DB, tmp_db)
     return tmp_db
 
@@ -324,7 +369,7 @@ def get_existing_notes() -> dict[str, str]:
         for md_file in notes_dir.rglob("*.md"):
             name = md_file.stem
             relative_parts = md_file.relative_to(notes_dir).parts
-            # 跳过 _待整理, _概念 等特殊目录和目录页
+            # 跳过配置中的收件箱、概念目录等特殊目录和目录页
             if any(part.startswith("_") for part in relative_parts):
                 continue
             if md_file.parent.name == name:
@@ -401,9 +446,104 @@ def save_progress(progress: dict):
         json.dump(progress, f, indent=2, ensure_ascii=False)
 
 
-def call_claude_code(paper_source: dict, collection_path: str, item_id: int) -> tuple[bool, str]:
+def build_codex_command(prompt: str) -> list[str]:
+    """Build a command using current documented non-interactive Codex flags."""
+    cmd = [
+        _CODEX_BIN,
+        "-a",
+        "never",
+        "-s",
+        "workspace-write",
+        "-C",
+        _DAEMON_WORKDIR,
+    ]
+    if _CODEX_SEARCH:
+        cmd.append("--search")
+    if _CODEX_MODEL:
+        cmd.extend(["--model", _CODEX_MODEL])
+    cmd.extend(
+        [
+            "exec",
+            "--skip-git-repo-check",
+            "--ephemeral",
+        ]
+    )
+    if _CODEX_EXTRA_ARGS:
+        cmd.extend(shlex.split(_CODEX_EXTRA_ARGS))
+    cmd.append(prompt)
+    return cmd
+
+
+def build_claude_command(prompt: str) -> list[str]:
+    """Build a non-interactive Claude Code command without bypassing safety."""
+    cmd = [
+        _CLAUDE_BIN,
+        "--print",
+        "--permission-mode",
+        _CLAUDE_PERMISSION_MODE,
+        "--no-session-persistence",
+    ]
+    if _CLAUDE_MODEL:
+        cmd.extend(["--model", _CLAUDE_MODEL])
+    if _CLAUDE_EXTRA_ARGS:
+        cmd.extend(shlex.split(_CLAUDE_EXTRA_ARGS))
+    cmd.append(prompt)
+    return cmd
+
+
+def resolve_daemon_harness() -> str:
+    """Resolve the CLI adapter, refusing ambiguity when both are installed."""
+    aliases = {
+        "claude": "claude-code",
+        "claude-code": "claude-code",
+        "codex": "codex",
+    }
+    if _DAEMON_HARNESS != "auto":
+        try:
+            return aliases[_DAEMON_HARNESS]
+        except KeyError as exc:
+            raise RuntimeError(
+                "PAPER_DAEMON_HARNESS must be auto, claude-code, or codex"
+            ) from exc
+
+    if os.environ.get("CLAUDECODE"):
+        return "claude-code"
+    if os.environ.get("CODEX_THREAD_ID"):
+        return "codex"
+
+    available = {
+        harness
+        for harness, executable in (
+            ("claude-code", _CLAUDE_BIN),
+            ("codex", _CODEX_BIN),
+        )
+        if shutil.which(executable)
+    }
+    if len(available) == 1:
+        return available.pop()
+    if not available:
+        raise RuntimeError("Neither Claude Code nor Codex CLI is available")
+    raise RuntimeError(
+        "Both Claude Code and Codex are installed; set "
+        "PAPER_DAEMON_HARNESS=claude-code or codex"
+    )
+
+
+def build_harness_command(harness: str, prompt: str) -> list[str]:
+    if harness == "claude-code":
+        return build_claude_command(prompt)
+    if harness == "codex":
+        return build_codex_command(prompt)
+    raise RuntimeError(f"Unsupported paper daemon harness: {harness}")
+
+
+def call_harness(
+    paper_source: dict,
+    collection_path: str,
+    item_id: int,
+) -> tuple[bool, str]:
     """
-    调用 Claude Code 处理论文
+    调用选定的 harness 处理论文
 
     paper_source 可以包含:
     - pdf_path: 本地 PDF 路径
@@ -443,9 +583,9 @@ def call_claude_code(paper_source: dict, collection_path: str, item_id: int) -> 
         if arxiv_id:
             fallback_steps.extend(
                 [
-                    f"1. **arXiv HTML 版本**（推荐）: 用 WebFetch 读取 https://arxiv.org/html/{arxiv_id}，可直接获取图片 URL",
-                    f"2. **arXiv 摘要页**: 用 WebFetch 读取 https://arxiv.org/abs/{arxiv_id}",
-                    f"3. **arXiv PDF**: 下载 https://arxiv.org/pdf/{arxiv_id}.pdf 到本地后用 Read 读取",
+                    f"1. **arXiv HTML 版本**（推荐）: 获取 https://arxiv.org/html/{arxiv_id}，可直接获得图片 URL",
+                    f"2. **arXiv 摘要页**: 获取 https://arxiv.org/abs/{arxiv_id}",
+                    f"3. **arXiv PDF**: 下载 https://arxiv.org/pdf/{arxiv_id}.pdf 到本地读取",
                 ]
             )
         if paper_source.get('doi'):
@@ -465,7 +605,9 @@ def call_claude_code(paper_source: dict, collection_path: str, item_id: int) -> 
 优先使用 HTML 版本，因为可以直接获取在线图片链接！
 """
 
-    prompt = f"""请使用 paper-reader skill 读取并分析这篇论文，生成完整的结构化笔记。
+    harness = resolve_daemon_harness()
+    skill_invocation = "$paper-reader" if harness == "codex" else "/paper-reader"
+    prompt = f"""请使用 {skill_invocation} 读取并分析这篇论文，生成完整的结构化笔记。
 
 {source_info}
 Zotero 分类路径: {collection_path}
@@ -539,7 +681,7 @@ $$公式$$
 1. 分析完论文后，列出笔记中所有 [[概念]] 链接
 2. 检查每个概念是否已存在：查看 `{concepts_root}` 下已有概念笔记
 3. 对于不存在的概念，创建概念笔记文件
-4. 使用 Write 工具写入概念笔记
+4. 将内容写入概念笔记
 
 ## 自动分类与 Zotero 同步（重要）
 
@@ -566,15 +708,16 @@ $$公式$$
 
 根据你对论文的理解，保存到对应的 Obsidian 目录：
 - 基本结构：{notes_root}/对应分类路径/
-- 不确定时：{notes_root}/_待整理/
+- 不确定时：{INBOX_ROOT}/
 
 请直接开始处理，不需要确认。提取所有公式、图片和表格。"""
 
     try:
         result = subprocess.run(
-            ['claude', '-p', prompt, '--model', 'opus', '--permission-mode', 'acceptEdits', '--dangerously-skip-permissions'],
+            build_harness_command(harness, prompt),
             capture_output=True,
             text=True,
+            cwd=_DAEMON_WORKDIR,
             timeout=900  # 15分钟超时（因为要提取图片）
         )
 
@@ -673,7 +816,7 @@ def process_collection(collection_name: str, resume: bool = True):
         progress['current'] = {'item_id': item_id, 'title': title}
         save_progress(progress)
 
-        success, error = call_claude_code(paper_source, collection_path, item_id)
+        success, error = call_harness(paper_source, collection_path, item_id)
 
         if success:
             logger.info(f"✓ 完成: {title[:50]}")
@@ -739,6 +882,7 @@ def show_status():
 
 
 def main():
+    configure_logging()
     parser = argparse.ArgumentParser(description='Paper Reading Daemon')
     parser.add_argument('--collection', '-c', type=str, help='Zotero 分类名称')
     parser.add_argument('--status', '-s', action='store_true', help='显示当前状态')
@@ -775,7 +919,7 @@ def main():
 
     # 检查是否已有进程在运行
     if not acquire_lock():
-        logger.error("另一个 paper_daemon 进程正在运行！请先停止它或删除 ~/.claude/paper_daemon.pid")
+        logger.error(f"另一个 paper_daemon 进程正在运行！请先停止它或检查 {PID_FILE}")
         return
 
     try:

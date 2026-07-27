@@ -8,26 +8,8 @@ SKILLS_ROOT = REPO_ROOT / "skills"
 
 
 class HarnessContractTests(unittest.TestCase):
-    def test_claude_skill_frontmatter_uses_supported_fields(self) -> None:
-        allowed_fields = {
-            "name",
-            "description",
-            "when_to_use",
-            "argument-hint",
-            "arguments",
-            "disable-model-invocation",
-            "user-invocable",
-            "allowed-tools",
-            "disallowed-tools",
-            "model",
-            "effort",
-            "context",
-            "agent",
-            "background",
-            "hooks",
-            "paths",
-            "shell",
-        }
+    def test_skill_metadata_is_compatible_with_both_harnesses(self) -> None:
+        common_fields = {"name", "description"}
         for skill_path in sorted(SKILLS_ROOT.glob("*/SKILL.md")):
             text = skill_path.read_text(encoding="utf-8")
             self.assertTrue(text.startswith("---\n"), skill_path)
@@ -39,12 +21,20 @@ class HarnessContractTests(unittest.TestCase):
             }
             self.assertIn("name", keys, skill_path)
             self.assertIn("description", keys, skill_path)
-            self.assertFalse(keys - allowed_fields, skill_path)
+            self.assertFalse(keys - common_fields, skill_path)
 
-        self.assertFalse(
-            any(SKILLS_ROOT.glob("*/agents/openai.yaml")),
-            "Claude main must not depend on Codex agents/openai.yaml metadata",
-        )
+            codex_metadata = skill_path.parent / "agents" / "openai.yaml"
+            self.assertTrue(codex_metadata.exists(), codex_metadata)
+            self.assertIn(
+                "allow_implicit_invocation:",
+                codex_metadata.read_text(encoding="utf-8"),
+            )
+
+        for public_skill in ("daily-papers", "paper-reader", "generate-mocs"):
+            metadata = (
+                SKILLS_ROOT / public_skill / "agents" / "openai.yaml"
+            ).read_text(encoding="utf-8")
+            self.assertIn("allow_implicit_invocation: true", metadata)
 
     def test_canonical_daily_inputs_are_harness_neutral(self) -> None:
         daily_skill = (SKILLS_ROOT / "daily-papers" / "SKILL.md").read_text(
@@ -60,10 +50,10 @@ class HarnessContractTests(unittest.TestCase):
         paper_reader = (
             SKILLS_ROOT / "paper-reader" / "SKILL.md"
         ).read_text(encoding="utf-8")
-        self.assertIn("context: fork", paper_reader)
-        self.assertIn("allowed-tools:", paper_reader)
+        self.assertNotIn("context: fork", paper_reader)
+        self.assertNotIn("allowed-tools:", paper_reader)
 
-    def test_default_business_configuration_matches_main_contract(self) -> None:
+    def test_default_business_configuration_matches_unified_contract(self) -> None:
         config = json.loads(
             (SKILLS_ROOT / "_shared" / "user-config.json").read_text(
                 encoding="utf-8"
@@ -147,7 +137,9 @@ class HarnessContractTests(unittest.TestCase):
             SKILLS_ROOT / "daily-papers-notes" / "SKILL.md"
         ).read_text(encoding="utf-8")
         self.assertIn("vault_coordination.py\" acquire", daily_skill)
-        self.assertIn("--harness claude-code", daily_skill)
+        self.assertIn('--harness "{HARNESS_ID}"', daily_skill)
+        self.assertIn("Claude Code 使用 `claude-code`", daily_skill)
+        self.assertIn("Codex 使用 `codex`", daily_skill)
         self.assertIn("vault_coordination.py\" complete", notes_skill)
         self.assertIn("不得自动 rebase", daily_skill)
 

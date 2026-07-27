@@ -1,8 +1,8 @@
 # dailypaper-skills 🗞️
 
-这是我自己平时读论文用的一套 Claude Code skills。
+这是一套可由 Claude Code 和 Codex 共用的每日论文 skills。
 
-简单说，就是跟 Claude 说一句话，它会帮我从每天的新论文里筛一轮，挑出值得看的，再把重点论文读完、写成 Obsidian 笔记。日常不用记一堆命令，基本就是：
+简单说，就是跟当前 harness 说一句话，它会帮你从每天的新论文里筛一轮，挑出值得看的，再把重点论文读完、写成 Obsidian 笔记。日常不用记一堆命令，基本就是：
 
 ```text
 今日论文推荐
@@ -11,8 +11,9 @@
 
 如果你也有“每天想看看新论文，但不想每天从一堆页面里手动捞”的痛苦，这个仓库大概就是为这种场景准备的。
 
-> **🧊 Codex / Humanoid 适配**
-> 想看 Codex 适配版的话，可以先看 [`codex+humanoid`](https://github.com/haoz0206/dailypaper-skills/tree/codex%2Bhumanoid) 分支。
+> **统一 harness 分支**
+> 当前分支同时包含 Claude Code 可读取的 `SKILL.md` 和 Codex 使用的
+> `agents/openai.yaml`，日常不需要为 harness 切换 Git 分支。
 
 > **🧩 顺手推荐**
 > 如果你主要在 Zotero 里读 PDF，可以搭配我另一个插件 [Zotero AI Sidebar](https://github.com/huangkiki/zotero-ai-sidebar)。这个插件是在 Zotero 右侧加一个 AI 侧栏，适合边读边问、点译、全文翻译、截图追问、写回 Zotero 笔记。
@@ -25,9 +26,9 @@
 
 ## Claude Code / Codex 相同点与不同点
 
-两个分支共享的用户可见接口：
+同一分支中的两个 harness 共享用户可见接口：
 
-| 项目 | 当前 Claude Code `main` | Codex 适配分支 |
+| 项目 | Claude Code | Codex |
 | --- | --- | --- |
 | 每日调用 | `今日论文推荐` | `今日论文推荐` |
 | 多日调用 | `过去3天论文推荐` / `过去一周论文推荐` | 相同 |
@@ -38,20 +39,22 @@
 | 默认研究配置 | embodied AI、world model、diffusion model | 相同 |
 | Markdown 模板 | 推荐页、论文笔记、wikilink、MOC | 相同 |
 
-当前真实存在的 adapter / 运行差异：
+仍然存在但不再需要分支隔离的 adapter 差异：
 
-| 项目 | 当前 Claude Code `main` | Codex 适配分支 |
+| 项目 | Claude Code | Codex |
 | --- | --- | --- |
-| Skill 安装 | `~/.claude/skills` | 项目级 `.agents/skills` 或用户级 `~/.agents/skills` |
+| Skill 安装 | `~/.claude/skills` | `~/.agents/skills` 或项目级 `.agents/skills` |
 | 显式调用 | `/daily-papers` | `$daily-papers` |
-| Skill 元数据 | frontmatter 的 `context`、`allowed-tools` | `agents/openai.yaml` |
+| Skill 元数据 | `SKILL.md` 的共同 frontmatter | 同一目录下的 `agents/openai.yaml` |
+| 协调身份 | `claude-code` | `codex` |
 | Vault 默认根目录 | 当前 Git 仓库根目录 `"."` | 相同 |
 | 中间数据 | `.dailypaper/runs/<run-id>/` 隔离 manifest | 相同 |
 | 日报 Git 行为 | acquisition commit + 一个精确内容 commit | 相同 |
 | 非 Zotero 单篇输入 | 不访问 Zotero，无法分类时写 `_待整理/` | 相同 |
 
-两个 harness 都会验证固定 Vault 远程，并通过任务状态文档原子取得同日写入权。应
-统一使用自然语言入口；显式调用、安装路径和元数据仍属于 adapter 差异。完整契约见
+两个 harness 从同一 checkout 读取 workflow，都会验证固定 Vault 远程，并通过任务
+状态文档原子取得同日写入权。应统一使用自然语言入口；显式调用、安装路径和元数据仍
+属于运行时 adapter 差异。完整契约见
 [HARNESS_CONTRACT.md](HARNESS_CONTRACT.md)。
 
 ## ✨ 它会帮你做什么
@@ -121,6 +124,7 @@
 需要这些东西：
 
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+- Codex CLI
 - [Obsidian](https://obsidian.md/)
 - [Python 3.10+](https://www.python.org/)
 - [`poppler-utils`](https://poppler.freedesktop.org/)，macOS 可以 `brew install poppler`
@@ -133,10 +137,10 @@
 /workspace/dailypaper-vault
 ```
 
-首次部署并把 skills 复制到 Claude Code 的用户级目录：
+首次部署并把同一份 skills 安装到两个 harness 的用户级目录：
 
 ```bash
-git clone --branch main \
+git clone --branch codex/unified-harness \
   git@github.com:haoz0206/dailypaper-skills.git \
   /workspace/dailypaper-skills
 git clone \
@@ -151,6 +155,9 @@ python3 /workspace/dailypaper-skills/skills/_shared/vault_coordination.py \
 
 mkdir -p ~/.claude/skills
 cp -R /workspace/dailypaper-skills/skills/. ~/.claude/skills/
+
+mkdir -p ~/.agents/skills
+cp -R /workspace/dailypaper-skills/skills/. ~/.agents/skills/
 ```
 
 `bootstrap` 可以安全重复执行。对于当前这样的空 Vault 远程，它会创建并推送首个
@@ -162,20 +169,16 @@ cp -R /workspace/dailypaper-skills/skills/. ~/.claude/skills/
 `paths.obsidian_vault = "."`，Mac 可以 clone 到别的目录而不改变协调指纹。
 非交互式任务还需要能使用服务器上的 GitHub SSH key。
 
-我自己在本地日常用的时候，通常会这样启动 Claude Code：
-
-```bash
-claude --dangerously-skip-permissions
-```
-
-这样会少很多权限确认，但它确实会跳过部分权限检查。所以更适合自己的个人机器，不建议在不熟悉的机器或共享环境里直接这么跑。
+从 `/workspace/dailypaper-vault` 内启动 Claude Code 或 Codex，即可让相同自然语言
+输入写入同一个 Vault。不要为切换 harness 而切换 skills 仓库分支。
 
 ## 配置
 
-默认配置文件在：
+安装后，两套 harness 各有一份相同的默认配置：
 
 ```text
 ~/.claude/skills/_shared/user-config.json
+~/.agents/skills/_shared/user-config.json
 ```
 
 推荐把共享配置提交到 Vault 的 `.dailypaper/config.json`，并在定时环境中设置：
@@ -185,7 +188,7 @@ export DAILYPAPER_VAULT=/workspace/dailypaper-vault
 export DAILYPAPER_CONFIG="$DAILYPAPER_VAULT/.dailypaper/config.json"
 ```
 
-你可以自己改，也可以直接让 Claude 帮你改，比如：
+你可以自己改，也可以直接让当前 harness 帮你改，比如：
 
 ```text
 帮我配置 dailypaper-skills。我的 Obsidian 库在 XXX，研究方向是 robot learning、VLA、diffusion policy。
@@ -206,6 +209,14 @@ export DAILYPAPER_CONFIG="$DAILYPAPER_VAULT/.dailypaper/config.json"
 | `repository.task_state_file` | 跨机器/跨 harness 任务状态文档 |
 
 Zotero 分类批量阅读不需要你另外写映射文件。只要 `paths.zotero_db` 和 `paths.zotero_storage` 配好，脚本会直接从 Zotero 分类树里查。
+
+批量阅读守护进程在同时安装两个 CLI 的机器上必须显式指定 harness：
+
+```bash
+export PAPER_DAEMON_HARNESS=claude-code  # 或 codex
+```
+
+这样不会因为 `PATH` 顺序不同而调用错误的 CLI。
 
 ## 我一般怎么搭配 Zotero AI Sidebar
 
@@ -237,7 +248,7 @@ Zotero AI Sidebar 更适合在读 PDF 的时候用：
 `今日论文推荐` 其实会拆成三步：
 
 1. **抓取**：从 HuggingFace Daily、Trending 和 arXiv API 抓候选论文，按你的关键词打分去重。
-2. **点评**：Claude 读候选列表，分成“必读 / 值得看 / 可跳过”，写到 Obsidian 的 `DailyPapers/` 目录。
+2. **点评**：当前 harness 读候选列表，分成“必读 / 值得看 / 可跳过”，写到 Obsidian 的 `DailyPapers/` 目录。
 3. **笔记**：对“必读”论文逐篇调用 `paper-reader`，生成完整论文笔记，补概念库，再刷新目录页。
 
 正常不用手动跑这三步。如果你只是想调试某一步，也可以说：
@@ -312,7 +323,8 @@ obsidian-templates/
 
 **能每天自动跑吗？**
 
-可以。你可以让 Claude 按你的系统环境配置定时任务，比如 macOS 的 `launchd` 或 Linux 的 `cron`。定时任务建议只触发 `今日论文推荐`，不要手写三条内部命令。
+可以。你可以让任一 harness 按系统环境配置定时任务，比如 macOS 的 `launchd` 或
+Linux 的 `cron`。定时任务建议只触发 `今日论文推荐`，不要手写三条内部命令。
 
 **生成的笔记能直接放进论文写作里吗？**
 
@@ -326,7 +338,7 @@ obsidian-templates/
 
 ## 支持这个项目
 
-如果这套 workflow 对你有帮助，欢迎点 Star、提 PR，或者分享你的适配版本。像 [`codex+humanoid`](https://github.com/haoz0206/dailypaper-skills/tree/codex%2Bhumanoid) 这种兼容性适配也很欢迎。
+如果这套 workflow 对你有帮助，欢迎点 Star、提 PR，或者分享你的适配版本。
 
 [![Star History Chart](https://api.star-history.com/svg?repos=haoz0206/dailypaper-skills&type=Date)](https://www.star-history.com/#haoz0206/dailypaper-skills&Date)
 

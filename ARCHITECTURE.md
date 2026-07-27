@@ -206,8 +206,12 @@ python3 paper_daemon.py --status     # 查看进度
 python3 paper_daemon.py --list       # 列出所有分类
 ```
 
+- 使用 `PAPER_DAEMON_HARNESS=claude-code|codex` 选择 CLI；只安装一个 CLI 时可自动
+  识别，同时安装两个时拒绝猜测
+- Claude Code 使用非交互 `--print`，Codex 使用非交互 `exec --ephemeral`；默认都
+  不启用危险的权限绕过参数
 - API 限流：指数退避（60s → 最大 6h）
-- 配额限制：优先解析 Codex 返回的重置时间；无法解析时默认等待 30 分钟
+- 配额限制：优先解析当前 harness 返回的重置时间；无法解析时默认等待 30 分钟
 - 断点续跑：checkpoint 持久化
 - 进程锁：防止并发
 - 自动跳过已有笔记（> 100 行）

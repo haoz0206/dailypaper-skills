@@ -23,7 +23,9 @@ description: |
    - `过去一周论文推荐`、`看看这周有啥论文` -> 7 天
 2. 将本 `SKILL.md` 所在目录的父目录解析为绝对路径 `SKILLS_ROOT`。所有脚本和内部
    Skill 都从 `SKILLS_ROOT` 解析，禁止依赖当前工作目录。
-3. 读取共享配置并确定 `VAULT_PATH` 和 `TIMEZONE = runtime.timezone`。
+3. 读取共享配置并确定 `VAULT_PATH` 和 `TIMEZONE = runtime.timezone`。根据当前宿主
+   设置 `HARNESS_ID`：Claude Code 使用 `claude-code`，Codex 使用 `codex`；不得根据
+   Vault 分支或输出路径猜测。
 4. 在创建任何本地 run 文件前，幂等初始化并同步 Vault：
 
    ```bash
@@ -46,7 +48,7 @@ description: |
 
    ```bash
    python3 "{SKILLS_ROOT}/_shared/vault_coordination.py" acquire \
-     "{RUN_MANIFEST}" --harness claude-code
+     "{RUN_MANIFEST}" --harness "{HARNESS_ID}"
    ```
 
    协调器会验证固定远程和分支、要求干净工作树、执行 `git pull --ff-only`、检查
