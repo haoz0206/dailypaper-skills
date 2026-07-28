@@ -4,10 +4,10 @@
 
 ```bash
 # 使用辅助脚本
-python3 scripts/paper-reader/zotero_helper.py collections          # 列出所有分类
-python3 scripts/paper-reader/zotero_helper.py papers 1             # 列出分类ID=1的论文
-python3 scripts/paper-reader/zotero_helper.py papers 1 --recursive # 递归包含子分类
-python3 scripts/paper-reader/zotero_helper.py pdf 12345            # 获取论文PDF路径
+python3 "{SKILL_ROOT}/scripts/paper-reader/zotero_helper.py" collections
+python3 "{SKILL_ROOT}/scripts/paper-reader/zotero_helper.py" papers 1
+python3 "{SKILL_ROOT}/scripts/paper-reader/zotero_helper.py" papers 1 --recursive
+python3 "{SKILL_ROOT}/scripts/paper-reader/zotero_helper.py" pdf 12345
 ```
 
 脚本先复制 Zotero 数据库，再以 SQLite read-only 模式打开快照；不得直接写入原始
@@ -53,7 +53,8 @@ def get_collection_path(collection_id):
 ### 判断流程
 
 1. **理解论文核心贡献** — 解决什么问题？核心方法？目标应用？
-2. **查看现有分类**：`python3 scripts/paper-reader/zotero_helper.py collections`
+2. **查看现有分类**：
+   `python3 "{SKILL_ROOT}/scripts/paper-reader/zotero_helper.py" collections`
 3. **选最合适的** — 问自己：找这篇论文会去哪个分类？按**主要贡献**分类，而非使用的技术
 4. **交叉学科** — 可添加到多个分类，选最核心的作为主分类
 
@@ -69,9 +70,9 @@ def get_collection_path(collection_id):
 
 ```bash
 # 查看论文当前分类
-python3 scripts/paper-reader/zotero_helper.py info {item_id}
+python3 "{SKILL_ROOT}/scripts/paper-reader/zotero_helper.py" info {item_id}
 # 查找目标分类 ID
-python3 scripts/paper-reader/zotero_helper.py find-collection "VLA"
+python3 "{SKILL_ROOT}/scripts/paper-reader/zotero_helper.py" find-collection "VLA"
 ```
 
 公共 Skill 不直接修改 Zotero SQLite。需要移动或添加分类时，在 Zotero UI 中由
