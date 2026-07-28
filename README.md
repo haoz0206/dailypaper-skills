@@ -182,6 +182,37 @@ npx skills add /workspace/dailypaper-skills \
   --copy --yes
 ```
 
+### 使用 `npx skills` 管理
+
+当前统一实现位于非默认分支，因此远程安装源必须保留上面 URL 中的
+`#codex%2Funified-harness`。安装器会把该 ref 和每个 Skill 的内容哈希写入自己的
+lockfile；后续更新会继续使用同一 ref，不会静默切回 `main`。
+
+查看已经安装到两个 harness 的公共 Skill：
+
+```bash
+npx skills list --global --agent claude-code codex
+```
+
+只更新这套 suite：
+
+```bash
+npx skills update \
+  daily-papers paper-reader generate-mocs configure-dailypaper \
+  --global --yes
+```
+
+卸载这四个 Skill（省略 `--agent` 会清理安装器记录的所有目标副本）：
+
+```bash
+npx skills remove \
+  daily-papers paper-reader generate-mocs configure-dailypaper \
+  --global --yes
+```
+
+重新安装时再次使用本节开头的完整 `npx skills add` 命令。不要手动复制单个
+`SKILL.md`：脚本、workflow、模板和参考资料都是 Skill 包的一部分。
+
 `/workspace/dailypaper-vault` 是服务器的 per-machine 配置；Mac 可以配置另一个
 绝对路径而不改变协调指纹。显式 `DAILYPAPER_VAULT`、
 `DAILYPAPER_CONFIG` 和 `DAILYPAPER_MACHINE_CONFIG` 仍可用作临时覆盖，但正常

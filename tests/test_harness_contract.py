@@ -1,4 +1,5 @@
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -18,6 +19,11 @@ class HarnessContractTests(unittest.TestCase):
     def test_public_skills_have_portable_metadata(self) -> None:
         skill_files = sorted(SKILLS_ROOT.glob("*/SKILL.md"))
         self.assertEqual(
+            sorted(SKILLS_ROOT.rglob("SKILL.md")),
+            skill_files,
+            "internal workflows must not become installer-visible skills",
+        )
+        self.assertEqual(
             {path.parent.name for path in skill_files},
             PUBLIC_SKILLS,
         )
@@ -31,6 +37,31 @@ class HarnessContractTests(unittest.TestCase):
                 if line and not line.startswith((" ", "\t")) and ":" in line
             }
             self.assertEqual(keys, {"name", "description"}, skill_path)
+
+            name_match = re.search(r"(?m)^name:\s*(\S+)\s*$", frontmatter)
+            self.assertIsNotNone(name_match, skill_path)
+            name = name_match.group(1)
+            self.assertEqual(name, skill_path.parent.name, skill_path)
+            self.assertRegex(name, r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+            self.assertLessEqual(len(name), 64, skill_path)
+
+            description_match = re.search(
+                r"(?ms)^description:\s*[|>]?\s*\n(?P<value>(?:[ \t]+.*\n?)+)",
+                frontmatter,
+            )
+            self.assertIsNotNone(description_match, skill_path)
+            description = " ".join(
+                line.strip()
+                for line in description_match.group("value").splitlines()
+            ).strip()
+            self.assertGreaterEqual(len(description), 1, skill_path)
+            self.assertLessEqual(len(description), 1024, skill_path)
+
+            self.assertLessEqual(
+                len(text.splitlines()),
+                500,
+                f"{skill_path} should use progressive disclosure",
+            )
         self.assertFalse(
             any(SKILLS_ROOT.rglob("openai.yaml")),
             "portable skills must not depend on vendor sidecar metadata",
