@@ -156,11 +156,13 @@ npx skills add \
   "https://github.com/haoz0206/dailypaper-skills.git#codex%2Funified-harness" \
   --skill daily-papers paper-reader generate-mocs configure-dailypaper \
   --agent claude-code codex \
-  --global --copy --yes
+  --global --yes
 ```
 
-这里显式使用 `--copy`，让每个 harness 得到完整、自包含的目录，不依赖仓库外部
-兄弟 Skill 或跨目录符号链接。
+这里使用安装器默认的共享主目录：Codex 读取 `.agents/skills` 中的完整 Skill，
+Claude Code 通过安装器管理的符号链接读取同一份内容。这样 `npx skills update`
+只需更新一个主副本，两个 harness 不会发生版本漂移；符号链接指向安装目录而不是
+本仓库 checkout。每个 Skill 包本身仍然完整、自包含，不依赖兄弟 Skill。
 
 安装后第一步运行：
 
@@ -179,7 +181,7 @@ Vault 远程，执行幂等 bootstrap，并把绝对路径保存到本机共享�
 npx skills add /workspace/dailypaper-skills \
   --skill daily-papers paper-reader generate-mocs configure-dailypaper \
   --agent claude-code codex \
-  --copy --yes
+  --yes
 ```
 
 ### 使用 `npx skills` 管理
@@ -212,6 +214,10 @@ npx skills remove \
 
 重新安装时再次使用本节开头的完整 `npx skills add` 命令。不要手动复制单个
 `SKILL.md`：脚本、workflow、模板和参考资料都是 Skill 包的一部分。
+
+只有在文件系统确实不支持符号链接时才使用 `--copy`。当前 `skills` CLI 的
+`update` 可能只刷新共享主副本而遗漏某些额外的物理副本；这类安装应重新执行完整
+的 `npx skills add ... --copy --yes` 命令来同步所有目标。
 
 `/workspace/dailypaper-vault` 是服务器的 per-machine 配置；Mac 可以配置另一个
 绝对路径而不改变协调指纹。显式 `DAILYPAPER_VAULT`、
