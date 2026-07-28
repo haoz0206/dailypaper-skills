@@ -1,16 +1,15 @@
 ---
 name: daily-papers
 description: |
-  DailyPaper suite for academic-paper discovery, daily recommendations, deep
-  reading, Obsidian notes and MOCs, and shared configuration. Use for “今日论文推荐”,
-  “过去3天论文推荐”, “过去一周论文推荐”, “读一下这篇论文（arXiv 或 PDF）”,
-  “更新索引”, “查看当前每日论文配置”, “配置每日论文”, or equivalent requests.
+  Discover and review recent academic papers, generate a daily Obsidian
+  recommendation, and create notes for must-read papers. Use for “今日论文推荐”,
+  “过去3天论文推荐”, “过去一周论文推荐”, or equivalent daily-paper requests.
 ---
 
 # DailyPaper Suite
 
-这是 Claude Code、Codex 和通用 Agent Skills 安装器共享的唯一公开 Skill。所有运行
-依赖、内部 workflow、脚本、模板和参考资料都位于本目录，禁止依赖兄弟 Skill。
+这是 Claude Code、Codex 和通用 Agent Skills 安装器共享的日报公共 Skill。所有
+运行依赖、内部 workflow、脚本、模板和参考资料都位于本目录，禁止依赖兄弟 Skill。
 
 ## 定位
 
@@ -25,21 +24,14 @@ description: |
 
 如果任何被引用文件缺失，停止并报告安装不完整；不得从仓库其他位置临时复制。
 
-## 路由
+## 执行
 
-根据用户请求读取并完整执行恰好一个公开 workflow：
+读取并完整执行 `{SKILL_ROOT}/workflows/daily.md`。该 workflow 会自行按顺序读取
+内部 `fetch.md`、`review.md`、`notes.md` 和私有 `paper-reader.md`。这些内部文件
+不是独立 Skill，不响应用户直接调用，也不自行取得任务所有权。
 
-- 日报、今日/多日论文推荐：
-  `{SKILL_ROOT}/workflows/daily.md`
-- 单篇论文、本地 PDF、arXiv 或显式 Zotero 阅读：
-  `{SKILL_ROOT}/workflows/paper-reader.md`
-- 更新 Obsidian 索引/MOC：
-  `{SKILL_ROOT}/workflows/generate-mocs.md`
-- 查看、初始化或修改 DailyPaper 配置：
-  `{SKILL_ROOT}/workflows/configure.md`
-
-日报 workflow 会自行按顺序读取内部 `fetch.md`、`review.md`、`notes.md`。这些内部
-文件不是独立 Skill，不响应用户直接调用，也不自行取得任务所有权。
+手动论文阅读、MOC 刷新和配置请求分别由公共 `paper-reader`、`generate-mocs` 和
+`configure-dailypaper` Skill 响应；不要从本 Skill 的 metadata 抢占这些请求。
 
 ## 跨 Harness 契约
 

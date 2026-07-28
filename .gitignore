@@ -1,6 +1,6 @@
 # Personal Zotero collection mapping (AI auto-generated)
 skills/daily-papers/scripts/paper-reader/collection_mapping.json
-skills/daily-papers/scripts/shared/user-config.local.json
+skills/*/scripts/shared/user-config.local.json
 .agents/skills/daily-papers/scripts/shared/user-config.local.json
 .claude/skills/daily-papers/scripts/shared/user-config.local.json
 

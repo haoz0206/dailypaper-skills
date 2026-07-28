@@ -6,46 +6,69 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILLS_ROOT = REPO_ROOT / "skills"
 SUITE_ROOT = SKILLS_ROOT / "daily-papers"
+PUBLIC_SKILLS = {
+    "daily-papers",
+    "paper-reader",
+    "generate-mocs",
+    "configure-dailypaper",
+}
 
 
 class HarnessContractTests(unittest.TestCase):
-    def test_only_public_skill_has_portable_metadata(self) -> None:
+    def test_public_skills_have_portable_metadata(self) -> None:
         skill_files = sorted(SKILLS_ROOT.glob("*/SKILL.md"))
-        self.assertEqual(skill_files, [SUITE_ROOT / "SKILL.md"])
-
-        text = skill_files[0].read_text(encoding="utf-8")
-        self.assertTrue(text.startswith("---\n"))
-        frontmatter = text.split("---", 2)[1]
-        keys = {
-            line.split(":", 1)[0]
-            for line in frontmatter.splitlines()
-            if line and not line.startswith((" ", "\t")) and ":" in line
-        }
-        self.assertEqual(keys, {"name", "description"})
+        self.assertEqual(
+            {path.parent.name for path in skill_files},
+            PUBLIC_SKILLS,
+        )
+        for skill_path in skill_files:
+            text = skill_path.read_text(encoding="utf-8")
+            self.assertTrue(text.startswith("---\n"))
+            frontmatter = text.split("---", 2)[1]
+            keys = {
+                line.split(":", 1)[0]
+                for line in frontmatter.splitlines()
+                if line and not line.startswith((" ", "\t")) and ":" in line
+            }
+            self.assertEqual(keys, {"name", "description"}, skill_path)
         self.assertFalse(
             any(SKILLS_ROOT.rglob("openai.yaml")),
             "portable skills must not depend on vendor sidecar metadata",
         )
 
-    def test_canonical_inputs_route_through_one_public_skill(self) -> None:
-        skill = (SUITE_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    def test_canonical_inputs_route_to_distinct_public_skills(self) -> None:
+        daily = (SUITE_ROOT / "SKILL.md").read_text(encoding="utf-8")
         for prompt in (
             "今日论文推荐",
             "过去3天论文推荐",
             "过去一周论文推荐",
+        ):
+            self.assertIn(prompt, daily)
+        for prompt in (
             "读一下这篇论文",
             "更新索引",
             "查看当前每日论文配置",
             "配置每日论文",
         ):
-            self.assertIn(prompt, skill)
-        for workflow in (
-            "daily.md",
-            "paper-reader.md",
-            "generate-mocs.md",
-            "configure.md",
-        ):
-            self.assertIn(f"workflows/{workflow}", skill)
+            self.assertNotIn(prompt, daily)
+
+        self.assertIn(
+            "读一下这篇论文",
+            (SKILLS_ROOT / "paper-reader" / "SKILL.md").read_text(
+                encoding="utf-8"
+            ),
+        )
+        self.assertIn(
+            "更新索引",
+            (SKILLS_ROOT / "generate-mocs" / "SKILL.md").read_text(
+                encoding="utf-8"
+            ),
+        )
+        configuration = (
+            SKILLS_ROOT / "configure-dailypaper" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("配置每日论文", configuration)
+        self.assertIn("查看当前每日论文配置", configuration)
 
     def test_internal_workflows_are_not_discoverable_skills(self) -> None:
         for workflow in ("fetch.md", "review.md", "notes.md"):
@@ -75,14 +98,28 @@ class HarnessContractTests(unittest.TestCase):
         self.assertIn("不得执行 Git add、commit 或 push", paper_reader)
 
     def test_configuration_workflow_is_state_safe(self) -> None:
-        config_workflow = (SUITE_ROOT / "workflows" / "configure.md").read_text(
-            encoding="utf-8"
-        )
+        config_workflow = (
+            SKILLS_ROOT / "configure-dailypaper" / "SKILL.md"
+        ).read_text(encoding="utf-8")
         self.assertIn("config_manager.py", config_workflow)
+        self.assertIn("machine_config.py", config_workflow)
+        self.assertIn("安装后的首个入口", config_workflow)
         self.assertIn("状态是 `running`", config_workflow)
         self.assertIn("不得自动 rebase", config_workflow)
         self.assertIn(".dailypaper/config.json", config_workflow)
         self.assertIn(".dailypaper/tasks/daily-papers.json", config_workflow)
+
+    def test_every_runtime_skill_requires_machine_onboarding(self) -> None:
+        for skill_name in ("daily-papers", "paper-reader", "generate-mocs"):
+            text = (SKILLS_ROOT / skill_name / "SKILL.md").read_text(
+                encoding="utf-8"
+            )
+            if skill_name == "daily-papers":
+                text += (SUITE_ROOT / "workflows" / "daily.md").read_text(
+                    encoding="utf-8"
+                )
+            self.assertIn("machine_config.py", text, skill_name)
+            self.assertIn("configure-dailypaper", text, skill_name)
 
     def test_default_business_configuration_matches_unified_contract(self) -> None:
         config = json.loads(

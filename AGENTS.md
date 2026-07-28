@@ -32,17 +32,20 @@ not the canonical user interface.
 
 ## Architecture
 
-- `skills/daily-papers/SKILL.md`: the only installer-visible entry and router.
-- `skills/daily-papers/workflows/`: daily, single-paper, MOC, configuration,
-  and private fetch/review/notes workflows.
-- `skills/daily-papers/scripts/`: deterministic implementation grouped by
-  workflow, with shared configuration and coordination under `scripts/shared/`.
-- `skills/daily-papers/assets/` and `references/`: bundled note template and
-  reading guidance.
+- `skills/daily-papers/`: public coordinated daily workflow and canonical
+  implementation source.
+- `skills/paper-reader/`: public standalone paper-reading Skill.
+- `skills/generate-mocs/`: public standalone Obsidian MOC maintenance Skill.
+- `skills/configure-dailypaper/`: public first-run onboarding and configuration
+  Skill.
+- `skills/daily-papers/workflows/fetch.md`, `review.md`, and `notes.md`: private
+  stages that require the parent run manifest and lock.
+- `tools/sync_public_skills.py`: materializes self-contained public Skills from
+  the canonical suite and checks that generated copies have not drifted.
 
-The suite must remain self-contained: installing `skills/daily-papers/` alone
-must include every runtime dependency. Internal workflows are resources, not
-independently discoverable Skills.
+Every public Skill must remain independently installable and include every
+runtime dependency. Internal stage workflows are resources, not discoverable
+Skills.
 
 Keep research keywords, scoring, paths, templates, generated Markdown, and
 Subagent delegation rules in the shared workflow. Keep explicit invocation
@@ -54,6 +57,10 @@ syntax, CLI flags, and host tool wording in runtime adapters.
   `skills/daily-papers/scripts/shared/user-config.json`.
 - Personal values belong in `user-config.local.json` or an external
   configuration supported by the current adapter.
+- Installation onboarding writes the shared cross-Harness machine file at
+  `~/.config/dailypaper/config.json` by default. It stores only per-machine
+  Vault and optional Zotero paths; `DAILYPAPER_MACHINE_CONFIG` may override its
+  location.
 - Zotero is optional. Do not access its SQLite database for ordinary arXiv or
   local-PDF inputs.
 - The persistent Linux server stores its Vault clone at
@@ -76,8 +83,9 @@ syntax, CLI flags, and host tool wording in runtime adapters.
 
 ## Branch maintenance
 
-- The unified branch contains exactly one portable `SKILL.md`, with only
-  `name` and `description` frontmatter and no vendor-specific sidecar metadata.
+- The unified branch contains exactly four public portable `SKILL.md` files,
+  each with only `name` and `description` frontmatter and no vendor-specific
+  sidecar metadata.
 - Harness identity is selected at runtime (`claude-code` or `codex`), never by
   switching the skills Git branch.
 - Prompt-level Subagent delegation must degrade to inline execution. Subagents

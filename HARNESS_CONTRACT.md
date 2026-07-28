@@ -61,16 +61,23 @@ Research interests belong in shared or local configuration, never in a harness
 adapter. Machine-local paths may differ, but all output-affecting configuration
 must produce the same configuration fingerprint for a coordinated run.
 
-On the persistent Linux server, the per-machine Vault location is:
+On the persistent Linux server, the recommended per-machine Vault location is:
 
 ```text
 /workspace/dailypaper-vault
 ```
 
-Set that value through `DAILYPAPER_VAULT` in the scheduler or service
-environment. The tracked Vault configuration keeps `paths.obsidian_vault` as
-`.`; absolute clone locations are deliberately excluded from the stable
-configuration fingerprint. Other machines may use another absolute clone path.
+Installation is not complete until the user runs the public
+`configure-dailypaper` Skill. It validates or initializes the Vault and stores
+the absolute clone path in `~/.config/dailypaper/config.json` by default.
+`DAILYPAPER_MACHINE_CONFIG` may relocate that machine file, while
+`DAILYPAPER_VAULT` remains a temporary explicit override. Scheduled runs must
+not fall back to their current working directory when this configuration is
+missing or invalid; they stop and direct the user to `configure-dailypaper`.
+
+The tracked Vault configuration keeps `paths.obsidian_vault` as `.`; absolute
+clone locations are deliberately excluded from the stable configuration
+fingerprint. Other machines may configure another absolute clone path.
 
 The coordinated Vault repository is fixed to:
 
@@ -92,10 +99,10 @@ commits required by the coordination protocol.
 
 ### Shared configuration mutation
 
-The configuration workflow inside the public `daily-papers` Skill is the
-canonical natural-language adapter for shared configuration. Both Harnesses
-must map the same request to the same supported fields and deterministic
-validator. It may update:
+The public `configure-dailypaper` Skill is both the installation onboarding
+entry and the canonical natural-language adapter for shared configuration.
+Both Harnesses must map the same request to the same supported fields and
+deterministic validator. It may update:
 
 - `daily_papers.keywords`
 - `daily_papers.negative_keywords`
@@ -245,25 +252,34 @@ Git automation has the same observable result on both harnesses:
 
 ## Installable package boundary
 
-The repository exposes exactly one installer-visible Skill:
-`skills/daily-papers/SKILL.md`. Its `workflows/`, `scripts/`, `assets/`, and
-`references/` directories are bundled implementation resources. Fetch, review,
-notes, paper-reader, MOC, and configuration workflows are not sibling Skills
-and must not be independently discovered or installed.
+The repository exposes exactly four installer-visible Skills:
 
-An installed copy must run without the source repository or any sibling
-directory. Harness identity is selected at runtime; installers do not select a
-Claude-specific or Codex-specific Git branch.
+- `skills/daily-papers/SKILL.md`: complete daily recommendation workflow.
+- `skills/paper-reader/SKILL.md`: manual single-paper and Zotero reading.
+- `skills/generate-mocs/SKILL.md`: manual Obsidian index refresh.
+- `skills/configure-dailypaper/SKILL.md`: first-run machine onboarding and
+  shared research configuration.
 
-Changes to default research keywords, output directories, note templates,
-scoring rules, or generated Markdown require a shared workflow change in the
-single unified branch.
+Fetch, review, and notes remain private stages of `daily-papers`; they are not
+independently discoverable or installable. Each public Skill is independently
+self-contained and must run without the source repository or sibling Skill
+directories. The three focused public packages are generated from canonical
+workflows and their minimal runtime resources by
+`tools/sync_public_skills.py`; CI/tests must run its `--check` mode to prevent
+drift.
+
+Harness identity is selected at runtime; installers do not select a
+Claude-specific or Codex-specific Git branch. Changes to default research
+keywords, output directories, note templates, scoring rules, or generated
+Markdown require a canonical shared workflow change in the single unified
+branch followed by public-package synchronization.
 
 ## Adapter validation
 
-The public Skill keeps only portable `name` and `description` frontmatter and has no
-vendor-specific sidecar metadata. When supported, `paper-reader` requests one
-Subagent through portable workflow instructions; otherwise it runs inline.
-Subagents never own the Vault lock, manifest, or Git publication. Both
+All four public Skills keep only portable `name` and `description` frontmatter
+and have no vendor-specific sidecar metadata. Their descriptions have
+non-overlapping primary trigger boundaries. When supported, `paper-reader`
+requests one Subagent through portable workflow instructions; otherwise it runs
+inline. Subagents never own the Vault lock, manifest, or Git publication. Both
 Harnesses call the same Python run context and Vault coordination scripts; they
 do not reimplement Git safety in natural-language instructions.

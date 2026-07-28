@@ -7,24 +7,33 @@
 ```
 用户说一句话
     │
-    └─ daily-papers（唯一公开 Skill，按意图路由）
-         ├─ "今日论文推荐" ──→ workflows/daily.md
-         │                       ├─ fetch.md（Python，零 token）
-         │                       ├─ review.md（当前 agent 点评）
-         │                       └─ notes.md（当前 agent + paper-reader workflow）
-         ├─ "读一下这篇论文" ──→ workflows/paper-reader.md
-         ├─ "更新索引" ──→ workflows/generate-mocs.md
-         └─ "配置每日论文" ──→ workflows/configure.md
+    ├─ configure-dailypaper（安装后首个入口；本机路径 + 共享研究配置）
+    ├─ daily-papers（每日推荐）
+    │    └─ workflows/daily.md
+    │         ├─ fetch.md（Python，零 token）
+    │         ├─ review.md（当前 agent 点评）
+    │         └─ notes.md（当前 agent + paper-reader workflow）
+    ├─ paper-reader（手动读单篇论文 / Zotero）
+    └─ generate-mocs（手动刷新 Obsidian 索引）
 ```
 
-整个 `skills/daily-papers/` 是一个自包含的深模块：安装器只发现根
-`SKILL.md`，内部 workflow、脚本、模板和参考资料随目录一起安装。三步流水线的
-设计主要是为了控制单次上下文长度。入口首先创建独立
+`skills/daily-papers/` 是完整日报能力的自包含深模块。`paper-reader`、
+`generate-mocs` 和 `configure-dailypaper` 是公开、可独立安装的聚焦入口；
+它们由 `tools/sync_public_skills.py` 从日报模块中的规范 workflow 和最小运行资源
+生成，避免复制实现发生漂移。安装器发现四个公共 `SKILL.md`，而 fetch、review、
+notes 三个流水线阶段仍然只作为 `daily-papers` 的内部资源。
+
+三步流水线的设计主要是为了控制单次上下文长度。入口首先创建独立
 `RunManifest`，三个阶段通过 manifest 中的运行级 JSON 路径传递数据，避免并发和失败
 重跑读到其他任务的文件。
 
-服务器上的 Vault 使用本机固定路径 `/workspace/dailypaper-vault`，通过
-`DAILYPAPER_VAULT` 注入。这个绝对路径不写入共享配置；Vault 内跟踪的
+安装后必须先运行 `configure-dailypaper`。服务器推荐使用
+`/workspace/dailypaper-vault`；该绝对路径默认写入本机
+`~/.config/dailypaper/config.json`，不会进入 Git。四个公共 Skill 启动时都会验证
+机器配置；缺失或无效时停止并要求配置，不会把当前工作目录当成 Vault。
+`DAILYPAPER_VAULT` 只作为临时显式覆盖。
+
+Vault 内跟踪的
 `.dailypaper/config.json` 使用相对值 `"."`，从而允许 Mac、服务器和其他 harness
 在不同 clone 路径上共享同一配置指纹。
 
@@ -144,7 +153,7 @@ pull，并且只有缺失 bootstrap 文件时才再提交，所以可幂等调�
 
 ## paper-reader workflow
 
-**既可由 suite 路由为单篇公开请求，也可由 notes workflow 内部调用。**
+**既是独立公共 Skill，也由 notes workflow 作为内部能力调用。**
 
 ### 输入源
 
