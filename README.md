@@ -204,6 +204,12 @@ npx skills update \
   --global --yes
 ```
 
+对非默认 Git 分支，当前 CLI 可能先显示
+`Failed to check for deleted skills from haoz0206/dailypaper-skills`，随后仍逐项输出
+`Updated`。这是已删除 Skill 目录检查的限制；四项刷新和 lockfile 中的
+`ref: codex/unified-harness` 才是本次更新是否成功的判断依据。若将来从仓库移除
+某个公共 Skill，请再显式执行下面的 `remove`。
+
 卸载这四个 Skill（省略 `--agent` 会清理安装器记录的所有目标副本）：
 
 ```bash
