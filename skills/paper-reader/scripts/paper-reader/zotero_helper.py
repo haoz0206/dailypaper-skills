@@ -6,10 +6,10 @@ Zotero 的原始数据库；分类变更应由用户在 Zotero 中完成。
 """
 
 import sqlite3
-import shutil
 import argparse
 import sys
 import tempfile
+from contextlib import closing
 from pathlib import Path
 
 _SHARED_DIR = Path(__file__).resolve().parents[1] / "shared"
@@ -27,8 +27,11 @@ TEMP_DB = Path(_TEMP_DIR.name) / "zotero_readonly.sqlite"
 
 
 def copy_db():
-    """复制数据库以避免锁定，并以只读模式打开快照。"""
-    shutil.copy(ZOTERO_DB, TEMP_DB)
+    """通过 SQLite backup 创建一致快照，并以只读模式打开快照。"""
+    source_uri = f"{ZOTERO_DB.resolve().as_uri()}?mode=ro"
+    with closing(sqlite3.connect(source_uri, uri=True)) as source:
+        with closing(sqlite3.connect(TEMP_DB)) as snapshot:
+            source.backup(snapshot)
     return sqlite3.connect(f"file:{TEMP_DB}?mode=ro", uri=True)
 
 
