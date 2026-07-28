@@ -4,11 +4,14 @@
 
 ```bash
 # 使用辅助脚本
-python3 assets/zotero_helper.py collections         # 列出所有分类
-python3 assets/zotero_helper.py papers 1            # 列出分类ID=1的论文
-python3 assets/zotero_helper.py papers 1 --recursive # 递归包含子分类
-python3 assets/zotero_helper.py pdf 12345           # 获取论文PDF路径
+python3 scripts/paper-reader/zotero_helper.py collections          # 列出所有分类
+python3 scripts/paper-reader/zotero_helper.py papers 1             # 列出分类ID=1的论文
+python3 scripts/paper-reader/zotero_helper.py papers 1 --recursive # 递归包含子分类
+python3 scripts/paper-reader/zotero_helper.py pdf 12345            # 获取论文PDF路径
 ```
+
+脚本先复制 Zotero 数据库，再以 SQLite read-only 模式打开快照；不得直接写入原始
+数据库。
 
 **递归查询原理**：
 1. 先获取目标分类的所有子分类 ID（递归遍历 parentCollectionID）
@@ -50,7 +53,7 @@ def get_collection_path(collection_id):
 ### 判断流程
 
 1. **理解论文核心贡献** — 解决什么问题？核心方法？目标应用？
-2. **查看现有分类**：`python3 assets/zotero_helper.py collections`
+2. **查看现有分类**：`python3 scripts/paper-reader/zotero_helper.py collections`
 3. **选最合适的** — 问自己：找这篇论文会去哪个分类？按**主要贡献**分类，而非使用的技术
 4. **交叉学科** — 可添加到多个分类，选最核心的作为主分类
 
@@ -62,24 +65,23 @@ def get_collection_path(collection_id):
 | 用 3DGS 做 SLAM | 3DGS | SLAM | 目标是定位建图 |
 | DepthAnything | Deep Learning | Depth Estimation | 具体任务 |
 
-## Zotero 分类操作
+## Zotero 分类查询
 
 ```bash
 # 查看论文当前分类
-python3 assets/zotero_helper.py info {item_id}
+python3 scripts/paper-reader/zotero_helper.py info {item_id}
 # 查找目标分类 ID
-python3 assets/zotero_helper.py find-collection "VLA"
-# 移动论文
-python3 assets/zotero_helper.py move {item_id} {new_collection_id} --from {old_collection_id}
-# 添加到多个分类
-python3 assets/zotero_helper.py add-to-collection {item_id} {collection_id}
+python3 scripts/paper-reader/zotero_helper.py find-collection "VLA"
 ```
 
-### 何时移动分类
+公共 Skill 不直接修改 Zotero SQLite。需要移动或添加分类时，在 Zotero UI 中由
+用户完成；Skill 可以给出建议分类和当前/目标分类路径，但不得执行数据库写操作。
+
+### 何时建议调整分类
 
 | 当前分类 | 处理方式 |
 |----------|----------|
-| "2025"、"杂项"、"feifeili" 等临时分类 | **必须移动** |
-| 分类与论文内容不符 | 移动到正确分类 |
-| 基本正确但可更精确 | 可选：移动到子分类 |
+| "2025"、"杂项"、"feifeili" 等临时分类 | 建议用户移到稳定分类 |
+| 分类与论文内容不符 | 建议用户移到正确分类 |
+| 基本正确但可更精确 | 可建议移动到子分类 |
 | 完全正确 | 保持不变 |

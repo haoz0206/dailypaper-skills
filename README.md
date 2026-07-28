@@ -265,13 +265,9 @@ Zotero 分类批量阅读不需要另外写映射文件。需要时通过
 路径写进 Vault 的共享配置。不使用 Zotero 时无需配置，日报和普通 arXiv/本地 PDF
 阅读都不会打开 SQLite。
 
-批量阅读守护进程在同时安装两个 CLI 的机器上必须显式指定 harness：
-
-```bash
-export PAPER_DAEMON_HARNESS=claude-code  # 或 codex
-```
-
-这样不会因为 `PATH` 顺序不同而调用错误的 CLI。
+Zotero 分类批量阅读由当前已激活的 `paper-reader` workflow 直接执行；它不会从
+Python 脚本中再次启动另一个 Claude Code / Codex 进程。Zotero SQLite 只通过临时
+快照读取，分类调整只给出建议并由用户在 Zotero UI 中完成。
 
 ## 我一般怎么搭配 Zotero AI Sidebar
 

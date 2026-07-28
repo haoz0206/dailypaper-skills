@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""
-Zotero 数据库查询辅助脚本
-用于 paper-reader skill 的 Zotero 集成
+"""Zotero 数据库只读查询辅助脚本。
+
+所有查询都针对临时快照，并以 SQLite read-only 模式打开。这个工具绝不修改
+Zotero 的原始数据库；分类变更应由用户在 Zotero 中完成。
 """
 
 import sqlite3
-import os
 import shutil
 import argparse
 import sys
@@ -27,9 +27,9 @@ TEMP_DB = Path(_TEMP_DIR.name) / "zotero_readonly.sqlite"
 
 
 def copy_db():
-    """复制数据库以避免锁定"""
+    """复制数据库以避免锁定，并以只读模式打开快照。"""
     shutil.copy(ZOTERO_DB, TEMP_DB)
-    return sqlite3.connect(TEMP_DB)
+    return sqlite3.connect(f"file:{TEMP_DB}?mode=ro", uri=True)
 
 
 def get_all_child_collections(conn, collection_id: int) -> list[int]:
@@ -218,71 +218,6 @@ def get_item_collections(conn, item_id):
     return cursor.fetchall()
 
 
-def add_to_collection_db(item_id, collection_id):
-    """将论文添加到分类（需要直接操作原数据库）"""
-    # 注意：这会直接修改 Zotero 数据库，需谨慎
-    conn = sqlite3.connect(ZOTERO_DB)
-    cursor = conn.cursor()
-    try:
-        # 检查是否已存在
-        cursor.execute("""
-            SELECT 1 FROM collectionItems
-            WHERE collectionID = ? AND itemID = ?
-        """, (collection_id, item_id))
-        if cursor.fetchone():
-            print(f"论文 {item_id} 已在分类 {collection_id} 中")
-            return False
-
-        # 添加到分类
-        cursor.execute("""
-            INSERT INTO collectionItems (collectionID, itemID, orderIndex)
-            VALUES (?, ?, 0)
-        """, (collection_id, item_id))
-        conn.commit()
-        print(f"已将论文 {item_id} 添加到分类 {collection_id}")
-        return True
-    except Exception as e:
-        print(f"添加失败: {e}")
-        conn.rollback()
-        return False
-    finally:
-        conn.close()
-
-
-def remove_from_collection_db(item_id, collection_id):
-    """从分类中移除论文"""
-    conn = sqlite3.connect(ZOTERO_DB)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("""
-            DELETE FROM collectionItems
-            WHERE collectionID = ? AND itemID = ?
-        """, (collection_id, item_id))
-        if cursor.rowcount > 0:
-            conn.commit()
-            print(f"已从分类 {collection_id} 移除论文 {item_id}")
-            return True
-        else:
-            print(f"论文 {item_id} 不在分类 {collection_id} 中")
-            return False
-    except Exception as e:
-        print(f"移除失败: {e}")
-        conn.rollback()
-        return False
-    finally:
-        conn.close()
-
-
-def move_to_collection(item_id, new_collection_id, old_collection_id=None):
-    """移动论文到新分类（先添加到新分类，再从旧分类移除）"""
-    # 先添加到新分类
-    add_to_collection_db(item_id, new_collection_id)
-
-    # 如果指定了旧分类，从旧分类移除
-    if old_collection_id:
-        remove_from_collection_db(item_id, old_collection_id)
-
-
 def find_collection_by_name(conn, name):
     """根据名称查找分类"""
     cursor = conn.cursor()
@@ -343,7 +278,7 @@ def get_paper_info(conn, item_id):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Zotero 数据库查询工具')
+    parser = argparse.ArgumentParser(description='Zotero 数据库只读查询工具')
     subparsers = parser.add_subparsers(dest='command', help='子命令')
 
     # 列出分类
@@ -370,22 +305,6 @@ def main():
     find_parser = subparsers.add_parser('find-collection', help='根据名称查找分类')
     find_parser.add_argument('name', help='分类名称（支持模糊匹配）')
 
-    # 添加到分类
-    add_parser = subparsers.add_parser('add-to-collection', help='将论文添加到分类')
-    add_parser.add_argument('item_id', type=int, help='论文 ItemID')
-    add_parser.add_argument('collection_id', type=int, help='目标分类ID')
-
-    # 从分类移除
-    remove_parser = subparsers.add_parser('remove-from-collection', help='从分类移除论文')
-    remove_parser.add_argument('item_id', type=int, help='论文 ItemID')
-    remove_parser.add_argument('collection_id', type=int, help='分类ID')
-
-    # 移动到新分类
-    move_parser = subparsers.add_parser('move', help='移动论文到新分类')
-    move_parser.add_argument('item_id', type=int, help='论文 ItemID')
-    move_parser.add_argument('new_collection_id', type=int, help='新分类ID')
-    move_parser.add_argument('--from', dest='old_collection_id', type=int, help='旧分类ID（可选）')
-
     args = parser.parse_args()
 
     if not ZOTERO_DB.exists():
@@ -407,12 +326,6 @@ def main():
             get_paper_info(conn, args.item_id)
         elif args.command == 'find-collection':
             find_collection_by_name(conn, args.name)
-        elif args.command == 'add-to-collection':
-            add_to_collection_db(args.item_id, args.collection_id)
-        elif args.command == 'remove-from-collection':
-            remove_from_collection_db(args.item_id, args.collection_id)
-        elif args.command == 'move':
-            move_to_collection(args.item_id, args.new_collection_id, args.old_collection_id)
         else:
             parser.print_help()
     finally:

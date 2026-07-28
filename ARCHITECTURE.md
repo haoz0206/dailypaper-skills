@@ -286,23 +286,15 @@ Run Change Set 中的已登记修改可以存在；未知 dirty path 或注册�
 2. 检查概念笔记是否存在
 3. 不存在的按 16 类自动分类并创建
 
-### 批量处理（paper_daemon.py）
+### 批量阅读
 
-```bash
-python3 paper_daemon.py -c "VLA"     # 处理 VLA 分类
-python3 paper_daemon.py --status     # 查看进度
-python3 paper_daemon.py --list       # 列出所有分类
-```
+批量 Zotero 输入仍由当前 `paper-reader` workflow 处理：先用只读数据库快照列出
+条目，再按“一篇论文 = 一个独立执行上下文”的规则委派或 inline 执行。公共 Skill
+不再附带会递归启动 Claude Code / Codex CLI 的后台守护进程，避免嵌套 Harness
+拥有与父任务不同的权限和生命周期。
 
-- 使用 `PAPER_DAEMON_HARNESS=claude-code|codex` 选择 CLI；只安装一个 CLI 时可自动
-  识别，同时安装两个时拒绝猜测
-- Claude Code 使用非交互 `--print`，Codex 使用非交互 `exec --ephemeral`；默认都
-  不启用危险的权限绕过参数
-- API 限流：指数退避（60s → 最大 6h）
-- 配额限制：优先解析当前 harness 返回的重置时间；无法解析时默认等待 30 分钟
-- 断点续跑：checkpoint 持久化
-- 进程锁：防止并发
-- 自动跳过已有笔记（> 100 行）
+Zotero 集成是只读的。Skill 可以查询条目、分类和本地 PDF，并给出分类建议，但
+不得直接修改 Zotero SQLite；需要调整分类时由用户在 Zotero UI 中完成。
 
 ---
 

@@ -69,6 +69,9 @@ syntax, CLI flags, and host tool wording in runtime adapters.
   location.
 - Zotero is optional. Do not access its SQLite database for ordinary arXiv or
   local-PDF inputs.
+- Explicit Zotero inputs may query only a temporary read-only SQLite snapshot.
+  Public Skills never mutate the Zotero database or launch a nested Harness
+  process; classification changes are user actions in the Zotero UI.
 - The persistent Linux server stores its Vault clone at
   `/workspace/dailypaper-vault`. Treat this as per-machine environment
   configuration (`DAILYPAPER_VAULT`), not a tracked absolute path.

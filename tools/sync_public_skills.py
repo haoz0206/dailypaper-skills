@@ -56,8 +56,6 @@ PUBLIC_SKILLS = (
             "references/paper-reader/quality-standards.md",
             "references/paper-reader/zotero-guide.md",
             "scripts/daily/download_note_images.py",
-            "scripts/paper-reader/paper_daemon.py",
-            "scripts/paper-reader/reorganize_notes.py",
             "scripts/paper-reader/zotero_helper.py",
         ),
     ),
@@ -149,17 +147,34 @@ def sync(*, check: bool) -> list[str]:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
 
-        if check and target_root.exists():
+        if target_root.exists():
             actual = {
                 path.relative_to(target_root)
                 for path in target_root.rglob("*")
                 if path.is_file() and "__pycache__" not in path.parts
             }
             extras = actual - set(expected)
-            problems.extend(
-                f"unexpected: {(target_root / path).relative_to(REPO_ROOT)}"
-                for path in sorted(extras)
-            )
+            if check:
+                problems.extend(
+                    f"unexpected: {(target_root / path).relative_to(REPO_ROOT)}"
+                    for path in sorted(extras)
+                )
+            else:
+                for relative in sorted(extras):
+                    (target_root / relative).unlink()
+                for directory in sorted(
+                    (
+                        path
+                        for path in target_root.rglob("*")
+                        if path.is_dir() and "__pycache__" not in path.parts
+                    ),
+                    key=lambda path: len(path.parts),
+                    reverse=True,
+                ):
+                    try:
+                        directory.rmdir()
+                    except OSError:
+                        pass
     return problems
 
 

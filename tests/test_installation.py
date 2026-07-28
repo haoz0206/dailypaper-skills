@@ -5,6 +5,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+from tools import sync_public_skills
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +21,28 @@ PUBLIC_SKILLS = (
 
 
 class InstallationTests(unittest.TestCase):
+    def test_sync_prunes_obsolete_generated_resources(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            generated_root = Path(temp_dir)
+            with patch.object(
+                sync_public_skills,
+                "SKILLS_ROOT",
+                generated_root,
+            ):
+                sync_public_skills.sync(check=False)
+                obsolete = (
+                    generated_root
+                    / "paper-reader"
+                    / "scripts"
+                    / "paper-reader"
+                    / "obsolete.py"
+                )
+                obsolete.write_text("obsolete\n", encoding="utf-8")
+
+                sync_public_skills.sync(check=False)
+
+            self.assertFalse(obsolete.exists())
+
     def test_generated_public_skills_match_canonical_suite(self) -> None:
         result = subprocess.run(
             [
