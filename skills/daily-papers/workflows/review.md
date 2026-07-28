@@ -6,9 +6,10 @@
 
 ## 调用边界
 
-本阶段只接受 `daily-papers` 父流程调用。没有父流程提供的 `RUN_MANIFEST` 或其
-协调状态不是 `acquired` 时立即停止，并引导用户使用公开的每日推荐入口。不得
-自行取得 Vault 锁、提交或推送。
+本阶段只接受 `daily-papers` 父流程调用。没有父流程提供的 `RUN_MANIFEST`
+只读上下文、Coordinator 决策不是 `ready`，或当前 phase 不是 `reviewing` 时
+立即停止，并引导用户使用公开的每日推荐入口。不得修改 Manifest、取得 Vault
+所有权、写 Vault Task State、提交或推送。
 
 ## Step 0: 读取共享配置
 
@@ -41,14 +42,8 @@
 ## 前置检查
 
 1. 检查 `RUN_MANIFEST` 和其中声明的 `ENRICHED_INPUT` 是否存在
-2. 确认 `RUN_MANIFEST.coordination.status` 是 `acquired`
-3. 如果不存在或未取得所有权，告知用户需要从每日入口启动，然后停止
-4. 检查通过后运行：
-
-   ```bash
-   python3 "{SKILL_ROOT}/scripts/shared/run_context.py" update "{RUN_MANIFEST}" \
-     --status reviewing
-   ```
+2. 确认父流程传入的 Coordinator 决策是 `ready`，当前 phase 是 `reviewing`
+3. 如果不存在或 phase 不匹配，告知用户需要从每日入口启动，然后停止
 
 ## 工作流程
 
@@ -254,21 +249,37 @@ tags: [daily-papers, auto-generated]
      4. 验证：(今天新增) + (再推) 应该 >= 推荐文件中的论文数量
      5. 如果不匹配，重新扫描推荐文件补全缺失的条目
 
-2. 将推荐文件和 `.history.json` 的 Vault 相对路径加入本次运行的
-   `CHANGED_PATHS` 列表，并同步写入 manifest：
-
-   ```bash
-   python3 "{SKILL_ROOT}/scripts/shared/run_context.py" update "{RUN_MANIFEST}" \
-     --changed-path "DailyPapers/YYYY-MM-DD-论文推荐.md" \
-     --changed-path "DailyPapers/.history.json"
-   ```
-
-   示例中的目录名必须替换为配置解析出的 Vault 相对路径。**本阶段不得 git add、
-   commit 或 push**；最终 notes 阶段统一发布。
+2. 收集推荐文件和 `.history.json` 的 Vault 相对路径，返回父流程；不得直接登记
+   Manifest。示例中的目录名必须替换为配置解析出的 Vault 相对路径。
+   **本阶段不得写 Manifest、git add、commit 或 push**。
 
 ## 输出
 
-完成后告知用户：
+完成后向父 workflow 返回结构化报告（路径使用真实绝对 artifact 路径和 Vault
+相对 changed path）：
+
+```json
+{
+  "stage": "review",
+  "result": "success",
+  "artifacts": [
+    {"role": "recommendation", "path": "<推荐 Markdown 绝对路径>"},
+    {"role": "history", "path": "<.history.json 绝对路径>"}
+  ],
+  "changed_paths": [
+    "DailyPapers/YYYY-MM-DD-论文推荐.md",
+    "DailyPapers/.history.json"
+  ],
+  "counts": {"recommended": 0, "must_read": 0, "worth_reading": 0, "skip": 0}
+}
+```
+
+父流程验证报告后负责调用 `run_coordinator.py submit --result success`，登记
+artifacts/changed paths 并推进到 notes。失败时只返回
+`recoverable`/`attention`/`deterministic-failure` 分类建议、证据和已安全落盘
+路径，不得写运行状态。
+
+告知用户：
 - 推荐了多少篇论文
 - 必读/值得看/可跳过各多少篇
 - 把控制权返回父 workflow，由父流程继续执行 notes 阶段；不得要求用户另行调用
@@ -279,4 +290,4 @@ tags: [daily-papers, auto-generated]
 - 如果 manifest 或 `ENRICHED_INPUT` 不存在，立即返回父 workflow 并报告 fetch
   阶段产物缺失
 - 不生成论文笔记、不补充概念库（那是第 3 步的事）
-- 不做 git commit / push
+- 不做 Manifest、Vault Task State 或 git commit / push

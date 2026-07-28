@@ -6,10 +6,11 @@
 
 ## 调用边界
 
-本阶段只接受 `daily-papers` 父流程调用。若没有父流程提供的 `RUN_MANIFEST` 和
-`acquired` 协调状态，停止并要求从“今日论文推荐”等公开入口启动；不得把用户的
-普通推荐请求解释为直接运行本阶段。即使是维护者调试，也必须由父 workflow 先
-创建 manifest 并取得任务所有权。
+本阶段只接受 `daily-papers` 父流程调用。若没有父流程提供的 `RUN_MANIFEST`
+只读上下文，或父流程的 Coordinator 决策不是 `ready`，或当前 phase 不是
+`fetching`，停止并要求从“今日论文推荐”等公开入口启动；不得把用户的普通推荐
+请求解释为直接运行本阶段。即使是维护者调试，也必须由父 workflow 先通过
+`run_coordinator.py start` 建立或恢复 run。
 
 ## Step 0: 读取共享配置
 
@@ -39,17 +40,11 @@
 - 所有关键词、分类、阈值都以共享配置为准
 - `CANDIDATES_OUTPUT` 和 `ENRICHED_OUTPUT` 必须从 `RUN_MANIFEST.paths` 读取
 
-确认父流程提供的 `RUN_MANIFEST.coordination.status` 是 `acquired`。没有 manifest
-或任何其他状态都停止；内部阶段不得创建 manifest、调用 acquire 或直接写 Vault。
+确认父流程提供的 Coordinator 决策是 `ready`、`RUN_MANIFEST` 存在且 phase 为
+`fetching`。没有 manifest 或任何其他 phase 都停止；内部阶段不得创建、修改
+Manifest，不得取得/释放任务所有权，也不得直接写 Vault Task State 或运行 Git。
 
 后续统一以共享配置和上面的变量为准。
-
-开始抓取前更新运行状态：
-
-```bash
-python3 "{SKILL_ROOT}/scripts/shared/run_context.py" update "{RUN_MANIFEST}" \
-  --status fetching
-```
 
 ## 解析天数
 
@@ -132,11 +127,31 @@ python3 "{SKILL_ROOT}/scripts/daily/enrich_papers.py" \
 
 ## 输出
 
-完成后检查 `ENRICHED_OUTPUT` 存在且包含有效 JSON 数组。告知用户：
+完成后检查 `ENRICHED_OUTPUT` 存在且包含有效 JSON 数组。向父 workflow 返回
+结构化报告：
+
+```json
+{
+  "stage": "fetch",
+  "result": "success",
+  "artifacts": [
+    {"role": "candidates", "path": "<CANDIDATES_OUTPUT>"},
+    {"role": "enriched", "path": "<ENRICHED_OUTPUT>"}
+  ],
+  "changed_paths": [],
+  "counts": {"candidates": 0, "enriched": 0}
+}
+```
+
+其中计数替换为真实值。父流程验证文件后负责用 `run_coordinator.py submit
+--result success` 登记 artifacts 并推进 phase。本阶段只告知：
 - 抓取了多少篇论文
 - 富化成功多少篇
-- 把控制权返回父 workflow，由父流程继续执行 review 阶段；不得要求用户另行调用
-  内部阶段
+- 把控制权返回父 workflow；不得要求用户另行调用内部阶段
+
+失败时不要写 Manifest 或协调状态。返回同样结构的报告，将 `result` 建议分类为
+`recoverable`、`attention` 或 `deterministic-failure`，并附 `message`、stderr
+摘要和已经安全落盘的 artifacts。最终分类和提交由父流程负责。
 
 ## 注意事项
 
@@ -146,4 +161,5 @@ python3 "{SKILL_ROOT}/scripts/daily/enrich_papers.py" \
 - 如果 arXiv API 抓取失败，脚本自动 fallback 到仅 HuggingFace 源
 - 如果总论文数不足 20 篇，有多少处理多少
 - **周末策略**：arXiv 周末不更新，HF daily 周末基本为空，但 HF trending 持续更新。周末主要依赖 trending 来源
-- **不做 git 操作**，不生成推荐文件，只输出本次运行的中间 JSON
+- **不做 Manifest、Vault Task State 或 git 操作**，不生成推荐文件，只输出本次
+  运行的中间 JSON 和结构化阶段报告

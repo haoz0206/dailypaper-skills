@@ -80,7 +80,8 @@ class HarnessContractTests(unittest.TestCase):
         fetch = (SUITE_ROOT / "workflows" / "fetch.md").read_text(
             encoding="utf-8"
         )
-        self.assertIn("不得创建 manifest、调用 acquire", fetch)
+        self.assertIn("不得创建、修改", fetch)
+        self.assertIn("Vault Task State", fetch)
         notes = (SUITE_ROOT / "workflows" / "notes.md").read_text(
             encoding="utf-8"
         )
@@ -161,11 +162,17 @@ class HarnessContractTests(unittest.TestCase):
         notes = (SUITE_ROOT / "workflows" / "notes.md").read_text(
             encoding="utf-8"
         )
-        self.assertIn("vault_coordination.py\" acquire", daily)
+        self.assertIn("run_coordinator.py\" start", daily)
         self.assertIn('--harness "{HARNESS_ID}"', daily)
         self.assertIn("Claude Code 使用 `claude-code`", daily)
         self.assertIn("Codex 使用 `codex`", daily)
-        self.assertIn("vault_coordination.py\" complete", notes)
+        self.assertIn(
+            "run_coordinator.py submit --result success",
+            notes,
+        )
+        self.assertIn("--result progress", notes)
+        self.assertIn("cancel-confirmation-required", daily)
+        self.assertIn("exact `run_id`", daily)
         self.assertIn("不得自动 rebase", daily)
 
     def test_repository_contract_is_fixed(self) -> None:

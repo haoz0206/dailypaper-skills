@@ -4,9 +4,10 @@
 
 ## 调用边界
 
-本阶段只接受 `daily-papers` 父流程调用。没有父流程提供的 `RUN_MANIFEST` 或其
-协调状态不是 `acquired` 时立即停止，并引导用户使用公开入口。阶段本身保持父
-流程的任务所有权；Subagent 只允许逐篇写论文内容，不得操作协调状态或 Git。
+本阶段只接受 `daily-papers` 父流程调用。没有父流程提供的 `RUN_MANIFEST`
+只读上下文、Coordinator 决策不是 `ready`，或当前 phase 不是
+`writing-notes` 时立即停止，并引导用户使用公开入口。父流程保持任务所有权；
+本阶段和 Subagent 都不得修改 Manifest、Vault Task State 或 Git。
 
 ## Step 0: 读取共享配置
 
@@ -33,24 +34,20 @@
 - `DAILY_PAPERS_PATH = {VAULT_PATH}/{daily_papers_folder}`
 - `GIT_PUSH_ENABLED` 只有在 `GIT_COMMIT_ENABLED=true` 时才可能为真
 - `GIT_COMMIT_ENABLED` 和 `GIT_PUSH_ENABLED` 只控制 `paper-reader` 等独立
-  调用；本协调流水线取得所有权后，始终由 `vault_coordination.py complete`
-  按原子发布契约提交并 push，内部阶段不得用这两个开关绕过或重复发布
+  调用；本协调流水线始终由父流程调用 Run Coordinator 按原子发布契约提交并
+  push，内部阶段不得用这两个开关绕过或重复发布
 
 后续步骤统一使用上面的变量。
 
 ## 前置检查
 
 1. 检查 `RUN_MANIFEST` 和其中声明的 `ENRICHED_INPUT` 是否存在
-2. 确认 `RUN_MANIFEST.coordination.status` 是 `acquired`
+2. 确认父流程传入的 Coordinator 决策是 `ready`，当前 phase 是
+   `writing-notes`
 3. 检查今天的推荐文件 `{DAILY_PAPERS_PATH}/YYYY-MM-DD-论文推荐.md` 是否存在
-4. 如果任一不存在或未取得所有权，告知用户需要从每日入口启动，然后停止
+4. 如果任一不存在、决策不是 `ready` 或 phase 不匹配，告知用户需要从每日入口
+   启动，然后停止
 5. 全部检查通过后，才说一声“开始整理笔记 📝”并告知今天日期
-6. 然后运行：
-
-   ```bash
-   python3 "{SKILL_ROOT}/scripts/shared/run_context.py" update "{RUN_MANIFEST}" \
-     --status writing-notes
-   ```
 
 ## 工作流程
 
@@ -94,6 +91,10 @@
      manifest、取得或释放 Vault 锁、运行 Git add/commit/push
    - Subagent 必须返回实际笔记路径、概念/资源变更路径和质量检查结果；父阶段
      逐项验证后才能继续
+   - 每完成并验证一篇，立即向父 workflow 返回一条结构化 `progress` 报告，包含
+     该论文的 artifacts、所有实际 Vault 相对 changed paths 和质量检查结果。父
+     workflow 应调用 `run_coordinator.py submit --result progress` 保存详细
+     checkpoint；`progress` 不推进 phase。本阶段与 Subagent 不得自行调用该命令
    - **不要指定固定的输出路径**，让 paper-reader 自行决定文件名和分类目录
    - paper-reader 会用方法名缩写作为文件名（如 `DAPL.md`），并自动分类到正确子目录
    - 完成后扫描笔记目录，找到实际生成的文件路径和文件名，记录下来供 Step 3 回填
@@ -101,7 +102,8 @@
 
 > **铁律**：不论论文数量多少，"必读"的论文**全部**生成笔记，一篇不能少。
 > 耗时长是正常的，不是偷懒的理由。如果 context 接近上限，先把已完成内容落盘；
-> 保存当前 manifest 状态，然后告知用户剩余论文需要继续处理，**绝对不能默默跳过，也不能提交半成品**。
+> 向父流程返回 progress 报告并由父流程保存 checkpoint，然后告知用户剩余论文
+> 需要继续处理，**绝对不能默默跳过，也不能提交半成品**。
 
 #### ⚠️ 笔记质量硬性要求
 
@@ -178,34 +180,30 @@ python3 "{SKILL_ROOT}/scripts/shared/generate_paper_mocs.py"
 
 默认配置下这个开关是开启的，所以新增的概念和论文笔记通常会自动反映到各分类目录页中。
 
-### Step 5: 最终验证与原子 Git 发布
+### Step 5: 最终验证与返回发布报告
 
 1. 确认所有必读论文笔记、概念、链接和 MOC 均已通过检查。
-2. 将本次实际创建或修改的 Vault 相对路径加入 `CHANGED_PATHS`，去重并确认没有
-   路径逃出 `VAULT_PATH`。每得到一个路径，都用 manifest 的 `--changed-path`
-   参数登记；该参数可重复传入：
+2. 收集本次实际创建或修改的 Vault 相对路径到 `CHANGED_PATHS`，去重并确认没有
+   路径逃出 `VAULT_PATH`。不得直接写入 Manifest。
+3. 向父 workflow 返回最终结构化报告，列出推荐文件、history、每篇论文笔记、
+   新增概念、资源文件和 MOC 等所有实际 artifacts 与 changed paths：
 
-   ```bash
-   python3 "{SKILL_ROOT}/scripts/shared/run_context.py" update "{RUN_MANIFEST}" \
-     --changed-path "{paper_notes_folder}/实际生成的笔记.md"
+   ```json
+   {
+     "stage": "notes",
+     "result": "success",
+     "artifacts": [
+       {"role": "paper-note", "path": "<实际笔记绝对路径>"}
+     ],
+     "changed_paths": ["<Vault 相对路径>"],
+     "counts": {"concepts": 0, "paper_notes": 0, "backfilled_links": 0}
+   }
    ```
 
-3. 所有内容检查通过后，将状态更新为 `validated`。最终暂存路径以 manifest 中的
-   `changed_paths` 为唯一来源：
-
-   ```bash
-   python3 "{SKILL_ROOT}/scripts/shared/run_context.py" update "{RUN_MANIFEST}" \
-     --status validated
-   ```
-
-4. 调用确定性协调器完成任务状态校验、精确暂存、单一内容 commit 和 push：
-
-   ```bash
-   python3 "{SKILL_ROOT}/scripts/shared/vault_coordination.py" complete \
-     "{RUN_MANIFEST}"
-   ```
-
-5. 禁止手工执行 `git add -A`、commit、rebase 或 force push。协调器会：
+4. 父流程逐项验证后才调用 `run_coordinator.py submit --result success`。该调用
+   登记最终路径、推进 `validated`/`publishing` 并完成唯一内容 commit/push。
+   本阶段绝不直接发布。
+5. 禁止手工执行 `git add -A`、commit、rebase 或 force push。Run Coordinator 会：
    - 验证远程仍停留在本次抢锁 commit；
    - 验证配置指纹和远程任务 `run_id` 没有变化；
    - 拒绝 manifest 之外的工作树修改；
@@ -214,22 +212,28 @@ python3 "{SKILL_ROOT}/scripts/shared/generate_paper_mocs.py"
 
 ## 输出
 
-完成后告知用户：
+完成后把结构化报告交给父 workflow，并告知用户：
 - 创建了多少个新概念
 - 生成了多少篇论文笔记
 - 回填了多少个笔记链接
 - 流水线全部完成
+
+若未完成，返回 `recoverable`、`attention` 或 `deterministic-failure` 分类建议，
+附原因、已通过质量验证的 artifacts 和 changed paths；最终分类与
+`run_coordinator.py submit` 由父流程执行。发生异常中断时保留已经登记的
+progress checkpoints，下一次 `start` 从原 run 恢复。
 
 ## 注意事项
 
 - 如果前置文件不存在，必须先运行前面的步骤
 - `paper-reader` skill 会自动处理概念库补充，不要重复创建
 - 仅为"必读"论文生成笔记，"值得看"不生成，耗时正常，**不是跳过的理由**
-- 默认自动刷新目录页，并按远程 Vault 协调契约发布
+- 默认自动刷新目录页，并由父流程按远程 Vault 协调契约发布
 - **绝对禁止**以下偷懒行为：
   - 自己手写 70 行骨架笔记代替 paper-reader 输出
   - 以"context overflow"为由跳过论文不生成笔记
   - 看到文件已存在就跳过，不检查质量
   - 生成笔记后不做质量验证
-- 如果 context 真的接近上限：先保存 manifest 和已完成的笔记，但不要 commit。
-  然后**明确告知用户**还有 N 篇未完成，需要继续运行同一个 manifest。绝不能默默跳过
+- 如果 context 真的接近上限：先落盘并向父流程报告已完成的笔记，由父流程登记
+  progress checkpoint，但不要 commit。然后**明确告知用户**还有 N 篇未完成，
+  需要继续运行同一个 manifest。绝不能默默跳过

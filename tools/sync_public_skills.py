@@ -87,7 +87,7 @@ PUBLIC_SKILLS = (
         resources=COMMON_CONFIG
         + CONFIG_GUARD
         + (
-            "scripts/shared/run_context.py",
+            "scripts/shared/run_lifecycle.py",
             "scripts/shared/vault_coordination.py",
         ),
     ),

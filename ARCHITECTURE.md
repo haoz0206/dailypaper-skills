@@ -23,9 +23,10 @@
 生成，避免复制实现发生漂移。安装器发现四个公共 `SKILL.md`，而 fetch、review、
 notes 三个流水线阶段仍然只作为 `daily-papers` 的内部资源。
 
-三步流水线的设计主要是为了控制单次上下文长度。入口首先创建独立
-`RunManifest`，三个阶段通过 manifest 中的运行级 JSON 路径传递数据，避免并发和失败
-重跑读到其他任务的文件。
+三步流水线的设计主要是为了控制单次上下文长度。入口完成 bootstrap 后调用
+`run_coordinator.py start`，由协调器决定创建新 Run、验证并恢复同机 Run，或停止。
+三个阶段通过 Manifest v2 登记的运行级 JSON 路径传递数据，避免并发和失败重跑读到
+其他任务的文件。
 
 安装后必须先运行 `configure-dailypaper`。服务器推荐使用
 `/workspace/dailypaper-vault`；该绝对路径默认写入本机
@@ -41,6 +42,79 @@ Vault 内跟踪的
 `origin`、`main` 和干净工作树，创建可移植配置及忽略 `.dailypaper/runs/` 的
 `.gitignore`，生成首个初始化提交并普通 push。已有提交时该命令先 fast-forward
 pull，并且只有缺失 bootstrap 文件时才再提交，所以可幂等调用。
+
+---
+
+## Run lifecycle v2
+
+### 两层状态权威
+
+- Vault 中跟踪的 `.dailypaper/tasks/daily-papers.json`（Vault Task State）是
+  跨机器、跨 Harness 的所有权权威。只有 acquisition commit 普通 push 成功的
+  `run_id` 可以发布。
+- 本机忽略的 `.dailypaper/runs/<run-id>/manifest.json`（Run Manifest）是同一台
+  机器上的恢复权威，记录生命周期、checkpoints、产物、Run Change Set、配置指纹和
+  Workflow Contract。Manifest 本身不能取得或释放远程所有权。
+
+Manifest v2 不再用一个含糊的 status 同时表达所有状态：
+
+| 维度 | 值 |
+| --- | --- |
+| Phase | `prepared → fetching → reviewing → writing-notes → validated → publishing` |
+| Condition | `active`、`interrupted`、`attention-required` |
+| Outcome | 不可变的 `published`、`failed`、`cancelled` |
+
+Phase 只能向前推进；恢复当前 Phase 以及重复提交内容不变的 `progress` checkpoint
+是幂等的。协调器同时保存生命周期级 checkpoint 和阶段内 progress checkpoint；
+大文件留在 run 目录，Manifest 只记录受验证的路径、元数据和 hash。
+
+### 协调器接口
+
+Harness 只通过四个外部操作驱动日报：
+
+- `start`：bootstrap 后执行 start-or-resume，返回确定性的下一步。
+- `submit`：报告 `progress`、`success`、`recoverable`、`attention` 或
+  `deterministic-failure`，由协调器验证并推进，调用者不能指定下一 Phase。
+- `inspect`：只读查看本地生命周期与最新远程任务状态。
+- `cancel`：必须绑定用户确认的准确 `run_id`，并在 fresh fetch 后以远程 HEAD 和
+  `run_id` 做 compare-and-set。
+
+`RunLifecycle` 是 Manifest 的唯一受支持写入模块。每次变更都取得短期 manifest
+文件锁，检查 revision，写入临时文件并 `fsync + replace` 原子替换，同时保留上一
+revision 备份。`run_guardian.py` 持有整个运行期间的本地 execution/liveness
+`flock`，用于防止同机并发和提供诊断；guardian 不写 Manifest。
+
+父 Run Coordinator 是唯一允许调用 Manifest mutation、Vault ownership 和 Git
+publication 的执行者。Subagent 只能生成候选产物或返回阶段报告；它不能写
+Manifest、持有 guardian lock 或提交 Vault。
+
+### 恢复与取消
+
+同机异常中断可以沿用原 `run_id`，但 `start` 必须重新验证远程所有权、Manifest
+revision、配置指纹、Workflow Contract、checkpoint 和已登记 artifact hash。只有
+Run Change Set 中的已登记修改可以存在；未知 dirty path 或注册文件 hash 变化会
+阻止恢复，以保护用户手动修改。临时网络、限流或进程崩溃进入 `interrupted`；
+确定性无效配置等进入终态 `failed`；自动重试预算耗尽进入
+`attention-required`，并继续保留所有权等待用户，不会自动 resume。只有用户明确
+确认重试 exact `run_id` 后，入口才用
+`start --confirm-attention-run-id <run-id>` 恢复同一个 run。
+
+如果 Vault Task State 仍为 `running`，但本机没有对应的 run 目录，说明它来自另一
+台机器。系统不做跨机器 resume 或 lease 抢占，而是让 AI 展示准确 `run_id` 并询问
+用户是否取消。确认后 `cancel` fresh fetch；仅当远程 HEAD 和仍在运行的 `run_id`
+都与提案一致时写入 `cancelled`。状态发生变化则安全拒绝。取消后的本地产物不会
+自动删除。
+
+### 幂等发布
+
+进入 `publishing` 后，协调器只暂存 Run Change Set 与任务状态，创建并记录一个固定
+内容 commit。恢复时：
+
+1. 远程仍是 acquisition commit：重新 push 同一个内容 commit。
+2. 远程已经是该内容 commit：直接标记 `published`。
+3. 远程是其他提交：进入 `attention-required`，保留现场。
+
+任何路径都不允许自动 rebase、force push 或重新生成另一个内容 commit。
 
 ---
 
@@ -109,7 +183,8 @@ pull，并且只有缺失 bootstrap 文件时才再提交，所以可幂等调�
 
 - 写入 `{DAILY_PAPERS_PATH}/YYYY-MM-DD-论文推荐.md`
 - 更新 `.history.json`：追加今日推荐的 arXiv ID + 标题，只保留最近 30 天
-- 将变更路径加入当前 run；不在本阶段提交
+- 将产物候选和阶段进度返回父协调器；由父协调器校验 hash、登记 Run Change Set，
+  不在本阶段提交
 
 ---
 
@@ -144,7 +219,9 @@ pull，并且只有缺失 bootstrap 文件时才再提交，所以可幂等调�
 ### 3.4 刷新目录页 + git
 
 - 调用 `generate_concept_mocs.py` 和 `generate_paper_mocs.py`
-- 全部验证成功后，由 `vault_coordination.py` 创建一次精确暂存的内容 commit/push
+- 将完成产物返回父协调器；全部验证成功后，由 `run_coordinator.py submit` 进入
+  `validated` / `publishing`，并经 `vault_coordination.py` 创建或复用一次精确
+  暂存的内容 commit/push
 - acquisition commit 在抓取开始前已经取得跨机器任务所有权
 - acquisition 前的 pull 完成后会清除配置缓存并重新读取 Vault 配置，避免锁指纹
   使用 pull 前的旧值
@@ -297,17 +374,31 @@ python3 paper_daemon.py --list       # 列出所有分类
 
 Python 配置加载器，带缓存。提供 `load_user_config()` / `paths_config()` / `daily_papers_config()` / `automation_config()` 等便捷函数。会校验 `git_push` 不能在 `git_commit` 关闭时开启。
 
-### run_context.py
+### run_coordinator.py
 
-为每次运行创建隔离 manifest，记录日期、时区、中间文件、Vault 相对变更路径和远程
-协调结果。Claude Code 与 Codex 传递同一种 manifest。
+统一的日报生命周期门面。对 Harness 暴露 `start`、`submit`、`inspect` 和
+`cancel`，把阶段推进、恢复验证、跨机取消和发布决策集中在同一实现。
+
+### run_lifecycle.py
+
+Manifest v2 的唯一受支持写入模块。它执行 schema/Workflow Contract 校验、严格
+Phase 推进、condition/outcome 变更、artifact hash 与 Run Change Set 登记，并用
+per-mutation lock、revision compare-and-set、原子 snapshot 和上一 revision 备份
+保护本地状态。
+
+### run_guardian.py
+
+运行期间持有本地 execution/liveness `flock`，阻止同机两个父协调器同时驱动同一
+Run，并提供存活诊断。guardian 不写 Manifest，也不拥有 Vault Task State。
 
 ### vault_coordination.py
 
 每日任务的确定性 Git 协调器。运行前验证固定远程和分支、执行 fast-forward pull，
 并通过 `.dailypaper/tasks/daily-papers.json` 的 acquisition commit/push 原子抢占
-任务。运行后验证远程 HEAD、`run_id` 和配置指纹，只发布 manifest 登记的稳定输出。
-协调失败时禁止自动 rebase、force push 或锁抢占。
+任务。运行后验证远程 HEAD、`run_id` 和配置指纹，只发布 Manifest 登记的稳定
+输出；发布记录并复用固定内容 commit。跨机取消必须 fresh fetch，并以准确的远程
+HEAD 和 `run_id` 做 compare-and-set。协调失败时禁止自动 rebase、force push 或
+锁抢占。
 
 ### moc_builder.py
 

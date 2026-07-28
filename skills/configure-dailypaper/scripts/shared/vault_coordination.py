@@ -7,7 +7,6 @@ import argparse
 import copy
 import hashlib
 import json
-import os
 import socket
 import subprocess
 import tempfile
@@ -15,11 +14,19 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from run_context import load_manifest, update_manifest
+from run_lifecycle import (
+    DAILY_WORKFLOW_CONTRACT,
+    ConfigurationMismatch,
+    ContractMismatch,
+    Interruption,
+    LifecycleError,
+    RunLifecycle,
+)
 from user_config import (
     clear_config_cache,
     daily_papers_dir,
     load_user_config,
+    obsidian_vault_path,
     repository_config,
 )
 
@@ -91,7 +98,8 @@ def _task_relative_path() -> Path:
     return _safe_relative_path(FIXED_TASK_STATE_FILE)
 
 
-def _config_fingerprint() -> str:
+def configuration_fingerprint() -> str:
+    """Return the output-affecting configuration identity for a DailyPaper Run."""
     config = copy.deepcopy(load_user_config())
     paths = config.get("paths", {})
     for machine_local_key in (
@@ -111,6 +119,10 @@ def _config_fingerprint() -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+# Compatibility for existing callers while the public name is adopted.
+_config_fingerprint = configuration_fingerprint
+
+
 def _read_state(path: Path) -> dict | None:
     if not path.exists():
         return None
@@ -128,6 +140,41 @@ def _read_state(path: Path) -> dict | None:
     return data
 
 
+def _validate_state(data: dict, source: str) -> dict:
+    if data.get("version") != STATE_VERSION:
+        raise CoordinationError(
+            "invalid-state",
+            f"Unsupported task state version in {source}: {data.get('version')}",
+        )
+    if data.get("task") != TASK_NAME:
+        raise CoordinationError(
+            "invalid-state",
+            f"Unexpected task name in {source}: {data.get('task')}",
+        )
+    return data
+
+
+def _state_at_ref(vault: Path, ref: str, task_relative: Path) -> dict | None:
+    object_name = f"{ref}:{task_relative.as_posix()}"
+    exists = _git(vault, "cat-file", "-e", object_name, check=False)
+    if exists.returncode != 0:
+        return None
+    raw = _git_output(vault, "show", object_name)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise CoordinationError(
+            "invalid-state",
+            f"Remote task state is not valid JSON: {exc}",
+        ) from exc
+    if not isinstance(data, dict):
+        raise CoordinationError(
+            "invalid-state",
+            "Remote task state must be a JSON object.",
+        )
+    return _validate_state(data, object_name)
+
+
 def _write_state(path: Path, state: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -136,6 +183,65 @@ def _write_state(path: Path, state: dict) -> None:
         encoding="utf-8",
     )
     temporary.replace(path)
+
+
+def _manifest_data(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CoordinationError(
+            "invalid-manifest",
+            f"Could not read Run Manifest {path}: {exc}",
+        ) from exc
+    if not isinstance(data, dict):
+        raise CoordinationError(
+            "invalid-manifest",
+            f"Run Manifest must be a JSON object: {path}",
+        )
+    return data
+
+
+def _open_run(manifest_path: Path) -> tuple[dict, RunLifecycle]:
+    """Open the canonical v2 Run Manifest."""
+    raw = _manifest_data(manifest_path)
+    if raw.get("version") != 2:
+        raise CoordinationError(
+            "invalid-manifest",
+            f"Unsupported Run Manifest version: {raw.get('version')}",
+        )
+
+    try:
+        lifecycle = RunLifecycle.open(
+            manifest_path,
+            contract=DAILY_WORKFLOW_CONTRACT,
+            configuration_fingerprint=configuration_fingerprint(),
+            expected_vault=obsidian_vault_path().expanduser().resolve(),
+            expected_run_id=manifest_path.parent.name,
+        )
+    except ConfigurationMismatch as exc:
+        raise CoordinationError("config-conflict", str(exc)) from exc
+    except ContractMismatch as exc:
+        raise CoordinationError("contract-conflict", str(exc)) from exc
+    except (TypeError, ValueError, LifecycleError) as exc:
+        raise CoordinationError(
+            "invalid-manifest",
+            f"Could not open v2 Run Manifest: {exc}",
+        ) from exc
+    return lifecycle.snapshot().as_dict(), lifecycle
+
+
+def _record_acquisition(
+    lifecycle: RunLifecycle,
+    *,
+    lock_commit: str,
+    remote: str,
+    branch: str,
+) -> None:
+    lifecycle.record_acquisition(
+        acquisition_commit=lock_commit,
+        remote=remote,
+        branch=branch,
+    )
 
 
 def _bootstrap_config() -> dict:
@@ -394,6 +500,214 @@ def _sync_before_run(vault: Path, config: dict, remote: str) -> str:
     return _git_output(vault, "rev-parse", "HEAD")
 
 
+def inspect_task_state(vault: Path) -> dict:
+    """Fetch and inspect the remote task state without changing the worktree."""
+    vault = vault.expanduser().resolve()
+    config, remote = _repository_identity(vault)
+    branch = str(config["branch"])
+    _git(vault, "fetch", remote, branch)
+    remote_ref = f"refs/remotes/{remote}/{branch}"
+    remote_head = _git_output(vault, "rev-parse", remote_ref)
+    task_relative = _task_relative_path()
+    return {
+        "status": "inspected",
+        "vault": str(vault),
+        "remote": remote,
+        "branch": branch,
+        "remote_head": remote_head,
+        "task_state": _state_at_ref(vault, remote_ref, task_relative),
+    }
+
+
+def prepare_cancel(vault: Path, expected_run_id: str) -> dict:
+    """Bind a user cancellation decision to one remote head and running Run."""
+    if not expected_run_id.strip():
+        raise ValueError("expected_run_id must not be empty")
+    inspected = inspect_task_state(vault)
+    state = inspected["task_state"]
+    if state is None:
+        raise CoordinationError("no-task", "No remote DailyPaper task exists.")
+    if state.get("status") != "running":
+        raise CoordinationError(
+            "not-running",
+            f"Remote DailyPaper task is {state.get('status')!r}, not running.",
+        )
+    if state.get("run_id") != expected_run_id:
+        raise CoordinationError(
+            "run-changed",
+            (
+                f"Expected running Run {expected_run_id}, found "
+                f"{state.get('run_id')}"
+            ),
+            exit_code=3,
+        )
+    return {
+        "version": 1,
+        "operation": "cancel-dailypaper-run",
+        "vault": inspected["vault"],
+        "remote": inspected["remote"],
+        "branch": inspected["branch"],
+        "remote_head": inspected["remote_head"],
+        "expected_run_id": expected_run_id,
+        "task_state": state,
+    }
+
+
+def _cancellation_candidate(
+    vault: Path,
+    *,
+    expected_url: str,
+    branch: str,
+    expected_head: str,
+    state: dict,
+    task_relative: Path,
+) -> tuple[bool, str, str]:
+    with tempfile.TemporaryDirectory(prefix="dailypaper-cancel-") as temp_dir:
+        candidate = Path(temp_dir) / "vault"
+        clone = subprocess.run(
+            ["git", "clone", "--shared", "--no-checkout", str(vault), str(candidate)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if clone.returncode != 0:
+            detail = clone.stderr.strip() or clone.stdout.strip()
+            raise CoordinationError(
+                "git-error",
+                f"Could not create cancellation candidate: {detail}",
+            )
+        _git(candidate, "remote", "set-url", "origin", expected_url)
+        _git(candidate, "fetch", "origin", branch)
+        fetched_head = _git_output(
+            candidate,
+            "rev-parse",
+            f"refs/remotes/origin/{branch}",
+        )
+        if fetched_head != expected_head:
+            raise CoordinationError(
+                "cancel-stale",
+                (
+                    f"Remote moved from confirmed head {expected_head} "
+                    f"to {fetched_head}."
+                ),
+                exit_code=3,
+            )
+        _git(candidate, "checkout", "--detach", expected_head)
+        _write_state(candidate / task_relative, state)
+        _git(candidate, "add", "--", task_relative.as_posix())
+        _git(
+            candidate,
+            "-c",
+            f"user.name={COMMIT_NAME}",
+            "-c",
+            f"user.email={COMMIT_EMAIL}",
+            "commit",
+            "-m",
+            f"dailypaper: cancel {state['target_date']} ({state['run_id']})",
+        )
+        cancellation_commit = _git_output(candidate, "rev-parse", "HEAD")
+        push = _git(
+            candidate,
+            "push",
+            "origin",
+            f"HEAD:refs/heads/{branch}",
+            check=False,
+        )
+        detail = push.stderr.strip() or push.stdout.strip()
+        return push.returncode == 0, cancellation_commit, detail
+
+
+def cancel(proposal: dict) -> dict:
+    """CAS-cancel one explicitly confirmed remote Run without local cleanup."""
+    required = {
+        "version",
+        "operation",
+        "vault",
+        "remote",
+        "branch",
+        "remote_head",
+        "expected_run_id",
+    }
+    missing = sorted(required - set(proposal))
+    if missing:
+        raise CoordinationError(
+            "invalid-proposal",
+            "Cancellation proposal is missing: " + ", ".join(missing),
+        )
+    if (
+        proposal["version"] != 1
+        or proposal["operation"] != "cancel-dailypaper-run"
+    ):
+        raise CoordinationError(
+            "invalid-proposal",
+            "Unsupported cancellation proposal.",
+        )
+
+    vault = Path(str(proposal["vault"])).expanduser().resolve()
+    config, remote = _repository_identity(vault)
+    branch = str(config["branch"])
+    if remote != proposal["remote"] or branch != proposal["branch"]:
+        raise CoordinationError(
+            "invalid-proposal",
+            "Cancellation proposal repository identity changed.",
+        )
+
+    inspected = inspect_task_state(vault)
+    if inspected["remote_head"] != proposal["remote_head"]:
+        raise CoordinationError(
+            "cancel-stale",
+            (
+                f"Remote moved from confirmed head {proposal['remote_head']} "
+                f"to {inspected['remote_head']}."
+            ),
+            exit_code=3,
+        )
+    state = inspected["task_state"]
+    expected_run_id = str(proposal["expected_run_id"])
+    if (
+        state is None
+        or state.get("status") != "running"
+        or state.get("run_id") != expected_run_id
+    ):
+        raise CoordinationError(
+            "cancel-stale",
+            "The confirmed Run is no longer the current running task.",
+            exit_code=3,
+        )
+
+    cancelled_at = datetime.now(ZoneInfo(FIXED_TIMEZONE))
+    cancelled_state = copy.deepcopy(state)
+    cancelled_state.update(
+        {
+            "status": "cancelled",
+            "updated_at": cancelled_at.isoformat(),
+            "cancelled_at": cancelled_at.isoformat(),
+        }
+    )
+    cancelled_state.pop("lease_until", None)
+    task_relative = _task_relative_path()
+    pushed, cancellation_commit, detail = _cancellation_candidate(
+        vault,
+        expected_url=str(config["url"]),
+        branch=branch,
+        expected_head=str(proposal["remote_head"]),
+        state=cancelled_state,
+        task_relative=task_relative,
+    )
+    if not pushed:
+        raise CoordinationError(
+            "cancel-raced",
+            f"Cancellation lost a remote race: {detail}",
+            exit_code=3,
+        )
+    return {
+        "status": "cancelled",
+        "run_id": expected_run_id,
+        "cancellation_commit": cancellation_commit,
+        "remote_head": cancellation_commit,
+    }
+
+
 def _now(manifest: dict, value: datetime | None = None) -> datetime:
     zone = ZoneInfo(str(manifest["timezone"]))
     if value is None:
@@ -511,7 +825,7 @@ def acquire(
     now: datetime | None = None,
 ) -> dict:
     manifest_path = manifest_path.expanduser().resolve()
-    manifest = load_manifest(manifest_path)
+    manifest = _manifest_data(manifest_path)
     if manifest.get("timezone") != FIXED_TIMEZONE:
         raise CoordinationError(
             "invalid-config",
@@ -522,6 +836,7 @@ def acquire(
     base_commit = _sync_before_run(vault, config, remote)
     clear_config_cache()
     config, remote = _repository_identity(vault)
+    manifest, lifecycle = _open_run(manifest_path)
 
     task_relative = _task_relative_path()
     task_path = vault / task_relative
@@ -529,21 +844,12 @@ def acquire(
     state = _read_state(task_path)
 
     if daily_output.exists():
-        result = {
+        return {
             "status": "already-completed",
             "target_date": manifest["target_date"],
             "daily_output": str(daily_output),
             "base_commit": base_commit,
         }
-        update_manifest(
-            manifest_path,
-            coordination={
-                "status": result["status"],
-                "base_commit": base_commit,
-                "task_state_file": task_relative.as_posix(),
-            },
-        )
-        return result
 
     if state and state.get("status") == "running":
         if state.get("run_id") == manifest["run_id"]:
@@ -554,15 +860,11 @@ def acquire(
                 "lock_commit": base_commit,
                 "resumed": True,
             }
-            update_manifest(
-                manifest_path,
-                coordination={
-                    **result,
-                    "remote": remote,
-                    "branch": str(config["branch"]),
-                    "task_state_file": task_relative.as_posix(),
-                    "config_sha256": state.get("config_sha256"),
-                },
+            _record_acquisition(
+                lifecycle,
+                lock_commit=base_commit,
+                remote=remote,
+                branch=str(config["branch"]),
             )
             return result
 
@@ -608,20 +910,17 @@ def acquire(
         "lock_commit": lock_commit,
         "resumed": False,
     }
-    update_manifest(
-        manifest_path,
-        coordination={
-            **result,
-            "remote": remote,
-            "branch": str(config["branch"]),
-            "task_state_file": task_relative.as_posix(),
-            "config_sha256": new_state["config_sha256"],
-        },
+    _record_acquisition(
+        lifecycle,
+        lock_commit=lock_commit,
+        remote=remote,
+        branch=str(config["branch"]),
     )
     return result
 
 
-def _dirty_paths(vault: Path) -> set[str]:
+def dirty_paths(vault: Path) -> set[str]:
+    """Return exact dirty Vault paths without modifying the worktree."""
     commands = (
         ("-c", "core.quotePath=false", "diff", "--name-only"),
         ("-c", "core.quotePath=false", "diff", "--cached", "--name-only"),
@@ -640,6 +939,10 @@ def _dirty_paths(vault: Path) -> set[str]:
     return paths
 
 
+# Compatibility for existing callers while the public name is adopted.
+_dirty_paths = dirty_paths
+
+
 def _verify_owner(
     manifest: dict,
     *,
@@ -647,12 +950,15 @@ def _verify_owner(
     config: dict,
     remote: str,
 ) -> tuple[dict, Path, str]:
-    coordination = manifest.get("coordination", {})
-    if coordination.get("status") != "acquired":
+    acquisition_commit = manifest.get("publication", {}).get(
+        "acquisition_commit"
+    )
+    if not acquisition_commit:
         raise CoordinationError(
             "not-owner",
-            "Run manifest has not acquired the Vault task.",
+            "Run Manifest has not recorded Vault task acquisition.",
         )
+    lock_commit = str(acquisition_commit)
 
     task_relative = _task_relative_path()
     state = _read_state(vault / task_relative)
@@ -669,7 +975,7 @@ def _verify_owner(
             "state-conflict",
             "Run date or timezone no longer matches the acquired task.",
         )
-    if state.get("config_sha256") != _config_fingerprint():
+    if state.get("config_sha256") != configuration_fingerprint():
         raise CoordinationError(
             "config-conflict",
             "Effective configuration changed after the task was acquired.",
@@ -682,7 +988,6 @@ def _verify_owner(
         "rev-parse",
         f"refs/remotes/{remote}/{branch}",
     )
-    lock_commit = str(coordination.get("lock_commit", ""))
     if remote_head != lock_commit:
         raise CoordinationError(
             "remote-advanced",
@@ -701,38 +1006,185 @@ def _verify_owner(
     return state, task_relative, lock_commit
 
 
-def complete(
+def _remote_head(vault: Path, remote: str, branch: str) -> str:
+    _git(vault, "fetch", remote, branch)
+    return _git_output(vault, "rev-parse", f"refs/remotes/{remote}/{branch}")
+
+
+def _mark_publication_interrupted(
+    lifecycle: RunLifecycle,
+    *,
+    message: str,
+    attention_required: bool,
+) -> None:
+    try:
+        lifecycle.interrupt(
+            Interruption(
+                message=message,
+                attention_required=attention_required,
+            )
+        )
+    except LifecycleError:
+        # The publication metadata remains sufficient for a later safe resume.
+        pass
+
+
+def _finish_v2_publication(
+    lifecycle: RunLifecycle,
+    manifest: dict,
+    *,
+    content_commit: str,
+    changed_paths: list[str],
+) -> dict:
+    lifecycle.finish("published", content_commit=content_commit)
+    return {
+        "status": "success",
+        "target_date": manifest["target_date"],
+        "run_id": manifest["run_id"],
+        "content_commit": content_commit,
+        "changed_paths": changed_paths,
+    }
+
+
+def _complete_v2(
     manifest_path: Path,
+    manifest: dict,
+    lifecycle: RunLifecycle,
     *,
     now: datetime | None = None,
 ) -> dict:
-    manifest_path = manifest_path.expanduser().resolve()
-    manifest = load_manifest(manifest_path)
-    if manifest.get("status") != "validated":
+    if manifest.get("phase") != "publishing" or manifest.get("outcome") is not None:
         raise CoordinationError(
             "not-validated",
-            "Run must be validated before publication.",
+            "A v2 Run must be in publishing phase without an Outcome.",
         )
 
     vault = Path(manifest["paths"]["vault"]).resolve()
     config, remote = _repository_identity(vault)
-    state, task_relative, _ = _verify_owner(
-        manifest,
-        vault=vault,
-        config=config,
-        remote=remote,
-    )
+    branch = str(config["branch"])
+    publication = manifest["publication"]
+    acquisition_commit = str(publication.get("acquisition_commit") or "")
+    if not acquisition_commit:
+        raise CoordinationError(
+            "not-owner",
+            "Run Manifest has no acquisition commit.",
+        )
 
-    changed_paths = list(dict.fromkeys(manifest.get("changed_paths", [])))
+    task_relative = _task_relative_path()
+    current_remote = _remote_head(vault, remote, branch)
+    content_commit = publication.get("content_commit")
+    allowed_remote_heads = {acquisition_commit}
+    if content_commit:
+        allowed_remote_heads.add(str(content_commit))
+    if current_remote not in allowed_remote_heads:
+        message = (
+            f"Remote moved from Run commits {sorted(allowed_remote_heads)} "
+            f"to {current_remote}; preserving local outputs."
+        )
+        _mark_publication_interrupted(
+            lifecycle,
+            message=message,
+            attention_required=True,
+        )
+        raise CoordinationError("remote-advanced", message, exit_code=3)
+
+    remote_ref = f"refs/remotes/{remote}/{branch}"
+    remote_state = _state_at_ref(vault, remote_ref, task_relative)
+    if (
+        remote_state is None
+        or remote_state.get("run_id") != manifest["run_id"]
+    ):
+        raise CoordinationError(
+            "not-owner",
+            "Vault Task State is not owned by this Run.",
+        )
+    if remote_state.get("config_sha256") != configuration_fingerprint():
+        raise CoordinationError(
+            "config-conflict",
+            "Effective configuration changed after the task was acquired.",
+        )
+
+    changed_paths = list(dict.fromkeys(manifest.get("run_change_set", [])))
     daily_output = _daily_output_relative(manifest).as_posix()
     if daily_output not in changed_paths or not (vault / daily_output).exists():
         raise CoordinationError(
             "missing-output",
-            f"Validated run did not register its daily output: {daily_output}",
+            f"Validated Run did not register its daily output: {daily_output}",
+        )
+
+    if content_commit:
+        content_commit = str(content_commit)
+        if current_remote == content_commit:
+            return _finish_v2_publication(
+                lifecycle,
+                manifest,
+                content_commit=content_commit,
+                changed_paths=changed_paths,
+            )
+        if _git(
+            vault,
+            "cat-file",
+            "-e",
+            f"{content_commit}^{{commit}}",
+            check=False,
+        ).returncode != 0:
+            raise CoordinationError(
+                "missing-content-commit",
+                f"Recorded content commit is unavailable locally: {content_commit}",
+                exit_code=3,
+            )
+        push = _git(
+            vault,
+            "push",
+            remote,
+            f"{content_commit}:refs/heads/{branch}",
+            check=False,
+        )
+        observed_remote = _remote_head(vault, remote, branch)
+        if observed_remote == content_commit:
+            return _finish_v2_publication(
+                lifecycle,
+                manifest,
+                content_commit=content_commit,
+                changed_paths=changed_paths,
+            )
+        detail = push.stderr.strip() or push.stdout.strip()
+        if observed_remote != acquisition_commit:
+            message = (
+                f"Remote moved to {observed_remote} while retrying publication."
+            )
+            _mark_publication_interrupted(
+                lifecycle,
+                message=message,
+                attention_required=True,
+            )
+            raise CoordinationError("remote-advanced", message, exit_code=3)
+        _mark_publication_interrupted(
+            lifecycle,
+            message=f"Content push remains pending: {detail}",
+            attention_required=False,
+        )
+        raise CoordinationError(
+            "publish-failed",
+            f"Content commit was preserved locally; push failed: {detail}",
+            exit_code=3,
+        )
+
+    local_head = _git_output(vault, "rev-parse", "HEAD")
+    if local_head != acquisition_commit:
+        raise CoordinationError(
+            "local-head-changed",
+            f"Local HEAD moved from acquisition commit {acquisition_commit} to {local_head}.",
+        )
+    if remote_state.get("status") != "running":
+        raise CoordinationError(
+            "not-owner",
+            f"Vault Task State is {remote_state.get('status')!r}, not running.",
         )
 
     completed_at = _now(manifest, now)
-    state.update(
+    completed_state = copy.deepcopy(remote_state)
+    completed_state.update(
         {
             "status": "success",
             "updated_at": completed_at.isoformat(),
@@ -740,20 +1192,19 @@ def complete(
             "changed_paths": changed_paths,
         }
     )
-    state.pop("lease_until", None)
-    _write_state(vault / task_relative, state)
+    completed_state.pop("lease_until", None)
+    _write_state(vault / task_relative, completed_state)
 
     allowed = set(changed_paths)
     allowed.add(task_relative.as_posix())
-    unexpected = _dirty_paths(vault) - allowed
+    unexpected = dirty_paths(vault) - allowed
     if unexpected:
         raise CoordinationError(
             "unexpected-changes",
-            "Vault contains changes outside this run: " + ", ".join(sorted(unexpected)),
+            "Vault contains changes outside this Run: "
+            + ", ".join(sorted(unexpected)),
         )
-
-    stage_paths = sorted(allowed)
-    _git(vault, "add", "--", *stage_paths)
+    _git(vault, "add", "--", *sorted(allowed))
     staged = _git_output(
         vault,
         "-c",
@@ -767,7 +1218,6 @@ def complete(
             "nothing-to-publish",
             "No validated Vault changes were staged.",
         )
-
     _git(
         vault,
         "-c",
@@ -779,53 +1229,70 @@ def complete(
         f"daily papers: {manifest['target_date']}",
     )
     content_commit = _git_output(vault, "rev-parse", "HEAD")
+    lifecycle.record_content_commit(content_commit)
+
     push = _git(
         vault,
         "push",
         remote,
-        f"HEAD:refs/heads/{config['branch']}",
+        f"{content_commit}:refs/heads/{branch}",
         check=False,
     )
-    if push.returncode != 0:
-        update_manifest(
-            manifest_path,
-            coordination={
-                "status": "publish-failed",
-                "content_commit": content_commit,
-            },
+    observed_remote = _remote_head(vault, remote, branch)
+    if observed_remote == content_commit:
+        return _finish_v2_publication(
+            lifecycle,
+            manifest,
+            content_commit=content_commit,
+            changed_paths=changed_paths,
         )
-        detail = push.stderr.strip() or push.stdout.strip()
-        raise CoordinationError(
-            "publish-failed",
-            f"Content commit was preserved locally; push failed: {detail}",
-            exit_code=3,
+    detail = push.stderr.strip() or push.stdout.strip()
+    if observed_remote != acquisition_commit:
+        message = (
+            f"Remote moved to {observed_remote} while publishing "
+            f"{content_commit}."
         )
-
-    update_manifest(
-        manifest_path,
-        coordination={
-            "status": "success",
-            "content_commit": content_commit,
-            "completed_at": completed_at.isoformat(),
-        },
+        _mark_publication_interrupted(
+            lifecycle,
+            message=message,
+            attention_required=True,
+        )
+        raise CoordinationError("remote-advanced", message, exit_code=3)
+    _mark_publication_interrupted(
+        lifecycle,
+        message=f"Content push remains pending: {detail}",
+        attention_required=False,
     )
-    return {
-        "status": "success",
-        "target_date": manifest["target_date"],
-        "run_id": manifest["run_id"],
-        "content_commit": content_commit,
-        "changed_paths": changed_paths,
-    }
+    raise CoordinationError(
+        "publish-failed",
+        f"Content commit was preserved locally; push failed: {detail}",
+        exit_code=3,
+    )
 
 
-def fail(
+def complete(
     manifest_path: Path,
+    *,
+    now: datetime | None = None,
+) -> dict:
+    manifest_path = manifest_path.expanduser().resolve()
+    manifest, lifecycle = _open_run(manifest_path)
+    return _complete_v2(
+        manifest_path,
+        manifest,
+        lifecycle,
+        now=now,
+    )
+
+
+def _fail_v2(
+    manifest_path: Path,
+    manifest: dict,
+    lifecycle: RunLifecycle,
     *,
     message: str,
     now: datetime | None = None,
 ) -> dict:
-    manifest_path = manifest_path.expanduser().resolve()
-    manifest = load_manifest(manifest_path)
     vault = Path(manifest["paths"]["vault"]).resolve()
     config, remote = _repository_identity(vault)
     state, task_relative, _ = _verify_owner(
@@ -834,7 +1301,6 @@ def fail(
         config=config,
         remote=remote,
     )
-
     failed_at = _now(manifest, now)
     state.update(
         {
@@ -872,21 +1338,30 @@ def fail(
             f"Failure state is local but could not be pushed: {detail}",
             exit_code=3,
         )
-    update_manifest(
-        manifest_path,
-        status="failed",
-        coordination={
-            "status": "failed",
-            "failure_commit": failure_commit,
-            "message": message,
-        },
-    )
+    lifecycle.finish("failed", reason=message)
     return {
         "status": "failed",
         "target_date": manifest["target_date"],
         "run_id": manifest["run_id"],
         "failure_commit": failure_commit,
     }
+
+
+def fail(
+    manifest_path: Path,
+    *,
+    message: str,
+    now: datetime | None = None,
+) -> dict:
+    manifest_path = manifest_path.expanduser().resolve()
+    manifest, lifecycle = _open_run(manifest_path)
+    return _fail_v2(
+        manifest_path,
+        manifest,
+        lifecycle,
+        message=message,
+        now=now,
+    )
 
 
 def main() -> None:
@@ -912,6 +1387,16 @@ def main() -> None:
     fail_parser.add_argument("manifest", type=Path)
     fail_parser.add_argument("--message", required=True)
 
+    inspect_parser = subparsers.add_parser("inspect")
+    inspect_parser.add_argument("--vault", required=True, type=Path)
+
+    prepare_cancel_parser = subparsers.add_parser("prepare-cancel")
+    prepare_cancel_parser.add_argument("--vault", required=True, type=Path)
+    prepare_cancel_parser.add_argument("--run-id", required=True)
+
+    cancel_parser = subparsers.add_parser("cancel")
+    cancel_parser.add_argument("proposal", type=Path)
+
     args = parser.parse_args()
     try:
         if args.command == "bootstrap":
@@ -924,8 +1409,28 @@ def main() -> None:
             )
         elif args.command == "complete":
             result = complete(args.manifest)
-        else:
+        elif args.command == "fail":
             result = fail(args.manifest, message=args.message)
+        elif args.command == "inspect":
+            result = inspect_task_state(args.vault)
+        elif args.command == "prepare-cancel":
+            result = prepare_cancel(args.vault, args.run_id)
+        else:
+            try:
+                proposal = json.loads(
+                    args.proposal.read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError) as exc:
+                raise CoordinationError(
+                    "invalid-proposal",
+                    f"Could not read cancellation proposal: {exc}",
+                ) from exc
+            if not isinstance(proposal, dict):
+                raise CoordinationError(
+                    "invalid-proposal",
+                    "Cancellation proposal must be a JSON object.",
+                )
+            result = cancel(proposal)
     except CoordinationError as exc:
         print(json.dumps(exc.as_dict(), ensure_ascii=False))
         raise SystemExit(exc.exit_code) from exc

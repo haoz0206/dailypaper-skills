@@ -40,6 +40,12 @@ not the canonical user interface.
   Skill.
 - `skills/daily-papers/workflows/fetch.md`, `review.md`, and `notes.md`: private
   stages that require the parent run manifest and lock.
+- `skills/daily-papers/scripts/shared/run_coordinator.py`: the only Harness-facing
+  daily lifecycle interface (`start`, `submit`, `inspect`, `cancel`).
+- `skills/daily-papers/scripts/shared/run_lifecycle.py`: Manifest v2 mutation,
+  validation, revision CAS, checkpoints, artifacts, and atomic snapshots.
+- `skills/daily-papers/scripts/shared/run_guardian.py`: run-wide local
+  execution/liveness lock; it never writes the Manifest.
 - `tools/sync_public_skills.py`: materializes self-contained public Skills from
   the canonical suite and checks that generated copies have not drifted.
 
@@ -78,6 +84,24 @@ syntax, CLI flags, and host tool wording in runtime adapters.
   coordinated daily run then creates one acquisition commit and at most one
   content commit, both with ordinary pushes. Standalone helper pushes remain
   opt-in.
+- Daily entry must bootstrap and then call the coordinator's start-or-resume
+  operation. It must not create or advance a Manifest directly.
+- Vault Task State is the cross-machine ownership authority; Manifest v2 is
+  only the local recovery authority. Same-machine resume requires matching
+  ownership, configuration fingerprint, Workflow Contract, checkpoints,
+  registered artifact hashes, and an allowed Run Change Set.
+- Manifest v2 separates strict forward Phase (`prepared`, `fetching`,
+  `reviewing`, `writing-notes`, `validated`, `publishing`), non-terminal
+  Condition (`active`, `interrupted`, `attention-required`), and immutable
+  Outcome (`published`, `failed`, `cancelled`).
+- A missing local run directory for a remote `running` run means
+  cross-machine recovery. Never auto-preempt it: show the exact `run_id`, ask
+  the user, then fresh-fetch and cancel only through remote-HEAD/run-ID CAS.
+- `attention-required` does not auto-resume. Cancellation preserves local
+  artifacts.
+- Publication records one fixed content commit and reuses it idempotently.
+  Unknown dirty paths, registered artifact hash changes, or an unexpected
+  remote HEAD block the run.
 - Git automation must stage only bootstrap files or paths written by the current
   run. Never use force push or automatic rebase for Vault coordination.
 
@@ -89,7 +113,8 @@ syntax, CLI flags, and host tool wording in runtime adapters.
 - Harness identity is selected at runtime (`claude-code` or `codex`), never by
   switching the skills Git branch.
 - Prompt-level Subagent delegation must degrade to inline execution. Subagents
-  never own Vault coordination, manifests, or Git publication.
+  only produce artifact candidates and progress reports; they never mutate the
+  Manifest, guardian lock, Vault ownership, or Git publication.
 - Keep stable inputs, outputs, templates, scoring rules, and default research
   settings in one shared implementation.
 - README must state the remaining runtime adapter differences without implying

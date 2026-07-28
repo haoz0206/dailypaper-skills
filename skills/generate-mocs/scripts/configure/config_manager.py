@@ -514,7 +514,7 @@ def guard_active_run(vault: Path) -> dict[str, Any]:
             f"({state.get('run_id', 'unknown')}) until "
             f"{state.get('lease_until', 'unknown')}"
         )
-    if state.get("status") not in {"success", "failed"}:
+    if state.get("status") not in {"success", "failed", "cancelled"}:
         raise ConfigError(
             f"Unexpected task status {state.get('status')!r} in {state_path}"
         )

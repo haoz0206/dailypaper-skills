@@ -48,7 +48,7 @@
 | Skill 元数据 | 标准 `SKILL.md` | 同一份标准 `SKILL.md` |
 | 协调身份 | `claude-code` | `codex` |
 | Vault 默认根目录 | 当前 Git 仓库根目录 `"."` | 相同 |
-| 中间数据 | `.dailypaper/runs/<run-id>/` 隔离 manifest | 相同 |
+| 中间数据 | `.dailypaper/runs/<run-id>/` 隔离 Manifest v2 | 相同 |
 | 日报 Git 行为 | acquisition commit + 一个精确内容 commit | 相同 |
 | 非 Zotero 单篇输入 | 不访问 Zotero，无法分类时写 `_待整理/` | 相同 |
 
@@ -278,6 +278,24 @@ Zotero AI Sidebar 更适合在读 PDF 的时候用：
 三个阶段是 suite 内部实现，不是独立安装或用户调用入口。维护者单阶段调试时也
 必须提供已经取得任务所有权的 run manifest。
 
+入口完成幂等 bootstrap 后，不会直接新建运行目录，而是调用统一协调器的
+`start`（start-or-resume）。协调器根据远程任务状态和本地 Manifest v2 返回下一步：
+新建、验证后续跑、当天已完成、等待其他机器，或要求用户处理异常。Harness 只执行
+协调器返回的指令，并通过 `submit` 报告 `progress`、`success`、
+`recoverable`、`attention` 或 `deterministic-failure`；不能自行推进阶段。
+
+Manifest v2 把三个维度分开记录：
+
+- Phase：`prepared → fetching → reviewing → writing-notes → validated → publishing`
+- Condition：`active`、`interrupted` 或 `attention-required`
+- Outcome：不可变的 `published`、`failed` 或 `cancelled`
+
+粗粒度生命周期 checkpoint 与各阶段细粒度 progress checkpoint 会同时保存。同机
+异常中断后，只有远程所有权仍属于同一 `run_id`、配置指纹和 Workflow Contract
+兼容、已登记产物 hash 一致、且工作树没有 Run Change Set 之外的未知修改时才可
+resume。`attention-required` 不会自动恢复；用户明确确认重试 exact `run_id`
+后，入口才会用 `start --confirm-attention-run-id <run-id>` 恢复。
+
 `读一下这篇论文 ...` 由公共 `paper-reader` 响应，支持 arXiv 链接、本地 PDF、
 显式 Zotero 搜索和 Zotero 分类；普通 arXiv/PDF 输入不会访问 Zotero SQLite。
 `更新索引` 由公共 `generate-mocs` 响应。`查看/修改每日论文配置` 由公共
@@ -295,15 +313,26 @@ Zotero AI Sidebar 更适合在读 PDF 的时候用：
 2. 验证 Vault 的 `origin` 是
    `git@github.com:haoz0206/dailypaper-vault.git`，当前分支是 `main`。
 3. 要求工作树干净并执行 `git pull --ff-only origin main`，随后重新加载配置。
-4. 检查当天输出和 `.dailypaper/tasks/daily-papers.json`。
-5. 用独立 acquisition commit/push 原子取得任务所有权。
+4. 调用协调器 `start` 检查当天输出、远程 Vault Task State 和本地
+   `.dailypaper/runs/<run-id>/manifest.json`。
+5. 新运行用独立 acquisition commit/push 原子取得任务所有权；同机异常运行则在
+   验证全部恢复条件后沿用原 `run_id`。
 
 只有抢锁 push 成功的 harness 才会继续。另一个 Claude Code/Codex 任务如果同时启动，
 普通 push 会被拒绝并立即停止，不会 rebase、force push 或覆盖同日内容。
 
-全部输出验证成功后，协调器只暂存 manifest 登记的路径以及任务状态文档，创建一个
-内容 commit 并 push。`automation.git_commit` / `git_push` 仍默认关闭，它们只控制
-独立调用 `paper-reader` 或 `generate-mocs` 时的 Git 行为，不控制完整日报协调协议。
+如果 Vault Task State 显示某个 `run_id` 仍在运行，但本机没有对应的本地 run
+目录，系统会把它视为另一台机器的运行：AI 必须展示准确的 `run_id` 并询问是否取消，
+绝不因 lease 到期自动抢占。用户确认后，`cancel` 会重新 fetch，并用远程 HEAD 和
+`run_id` 做 compare-and-set；状态已变化就拒绝取消。取消只撤销远程所有权，本地产物
+保留，直到用户显式清理。
+
+全部输出验证成功后，协调器只暂存 Manifest 登记的 Run Change Set 和任务状态文档，
+创建一次固定内容 commit。若 push 响应丢失，resume 会复用同一个 commit：远程仍在
+acquisition commit 时重试推送，远程已经是内容 commit 时直接完成；任何其他远程
+提交都会进入 `attention-required`。协议永远不自动 rebase 或 force push。
+`automation.git_commit` / `git_push` 仍默认关闭，它们只控制独立调用
+`paper-reader` 或 `generate-mocs` 时的 Git 行为，不控制完整日报协调协议。
 
 ## 仓库里有什么
 
@@ -325,7 +354,8 @@ obsidian-templates/
 
 `paper-reader` 不依赖厂商专属的 fork 配置：当前 Harness 支持 Subagent 时，prompt
 会要求把每篇论文委派给恰好一个 Subagent 并等待完成；不支持时执行相同的 inline
-流程。Vault 锁、manifest 和 Git 发布始终由父流程负责。
+流程。Subagent 只返回候选产物及进度，不能写 Manifest、持有运行锁或执行 Git
+发布；这些动作始终由父 Run Coordinator 负责。
 
 ## FAQ
 

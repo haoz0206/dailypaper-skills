@@ -18,7 +18,7 @@ SHARED_DIR = (
 if str(SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(SHARED_DIR))
 
-import run_context
+import run_lifecycle
 import user_config
 import vault_coordination
 
@@ -93,6 +93,7 @@ class VaultCoordinationTests(unittest.TestCase):
             str(self.remote),
         )
         self.fixed_remote.start()
+        self.manifest_counter = 0
         user_config.clear_config_cache()
 
     def tearDown(self) -> None:
@@ -131,6 +132,8 @@ class VaultCoordinationTests(unittest.TestCase):
 
     def _manifest(self, vault: Path | None = None) -> Path:
         selected_vault = vault or self.vault
+        self.manifest_counter += 1
+        run_id = f"2026-07-26-run-{self.manifest_counter}"
         with patch.dict(
             os.environ,
             {
@@ -142,10 +145,105 @@ class VaultCoordinationTests(unittest.TestCase):
             clear=False,
         ):
             user_config.clear_config_cache()
-            return run_context.create_run(
+            manifest = (
+                Path(os.environ["DAILYPAPER_RUN_ROOT"])
+                / run_id
+                / "manifest.json"
+            )
+            run_lifecycle.RunLifecycle.create(
+                manifest,
+                run_id=run_id,
                 target_date="2026-07-26",
                 timezone="Asia/Shanghai",
+                vault=selected_vault,
+                contract=run_lifecycle.DAILY_WORKFLOW_CONTRACT,
+                configuration_fingerprint=(
+                    vault_coordination.configuration_fingerprint()
+                ),
             )
+            return manifest
+
+    def _v2_manifest(self) -> tuple[Path, run_lifecycle.RunLifecycle]:
+        contract = run_lifecycle.DAILY_WORKFLOW_CONTRACT
+        manifest = self.runs / "2026-07-26-v2" / "manifest.json"
+        lifecycle = run_lifecycle.RunLifecycle.create(
+            manifest,
+            run_id="2026-07-26-v2",
+            target_date="2026-07-26",
+            timezone="Asia/Shanghai",
+            vault=self.vault,
+            contract=contract,
+            configuration_fingerprint=(
+                vault_coordination.configuration_fingerprint()
+            ),
+        )
+        return manifest, lifecycle
+
+    def _prepare_v2_publication(
+        self,
+    ) -> tuple[Path, run_lifecycle.RunLifecycle, Path]:
+        manifest, lifecycle = self._v2_manifest()
+        vault_coordination.acquire(
+            manifest,
+            harness="codex",
+            owner="test-host",
+        )
+        daily_output = (
+            self.vault / "DailyPapers" / "2026-07-26-论文推荐.md"
+        )
+        daily_output.parent.mkdir(parents=True)
+        daily_output.write_text("# 今日锐评\n", encoding="utf-8")
+        self._advance_to_publication(manifest, lifecycle, daily_output)
+        return manifest, lifecycle, daily_output
+
+    def _advance_to_publication(
+        self,
+        manifest: Path,
+        lifecycle: run_lifecycle.RunLifecycle,
+        daily_output: Path,
+    ) -> None:
+        lifecycle.advance("fetching")
+        candidates = manifest.parent / "candidates.json"
+        candidates.write_text("[]\n", encoding="utf-8")
+        enriched = manifest.parent / "enriched.json"
+        enriched.write_text("[]\n", encoding="utf-8")
+        lifecycle.checkpoint(
+            artifacts=[
+                run_lifecycle.ArtifactCandidate("candidates", candidates),
+                run_lifecycle.ArtifactCandidate("enriched", enriched),
+            ]
+        )
+        lifecycle.advance("reviewing")
+        history = daily_output.parent / ".history.json"
+        history.write_text("[]\n", encoding="utf-8")
+        lifecycle.checkpoint(
+            artifacts=[
+                run_lifecycle.ArtifactCandidate(
+                    "recommendation",
+                    daily_output,
+                ),
+                run_lifecycle.ArtifactCandidate("history", history),
+            ],
+            changed_paths=[daily_output, history],
+        )
+        lifecycle.advance("writing-notes")
+        lifecycle.checkpoint(
+            artifacts=[
+                run_lifecycle.ArtifactCandidate("daily-note", daily_output),
+                run_lifecycle.ArtifactCandidate("history", history),
+            ],
+            changed_paths=[daily_output, history],
+            allow_artifact_updates=True,
+        )
+        lifecycle.advance("validated")
+        lifecycle.checkpoint(
+            artifacts=[
+                run_lifecycle.ArtifactCandidate("daily-note", daily_output),
+                run_lifecycle.ArtifactCandidate("history", history),
+            ],
+            changed_paths=[daily_output, history],
+        )
+        lifecycle.advance("publishing")
 
     def test_acquire_pushes_machine_readable_task_state(self) -> None:
         manifest = self._manifest()
@@ -165,9 +263,9 @@ class VaultCoordinationTests(unittest.TestCase):
         self.assertEqual(state["harness"], "codex")
         self.assertEqual(git(self.vault, "rev-parse", "HEAD"), result["lock_commit"])
 
-        manifest_data = run_context.load_manifest(manifest)
+        manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
         self.assertEqual(
-            manifest_data["coordination"]["lock_commit"],
+            manifest_data["publication"]["acquisition_commit"],
             result["lock_commit"],
         )
 
@@ -209,6 +307,15 @@ class VaultCoordinationTests(unittest.TestCase):
 
     def test_complete_publishes_outputs_and_marks_success(self) -> None:
         manifest = self._manifest()
+        lifecycle = run_lifecycle.RunLifecycle.open(
+            manifest,
+            contract=run_lifecycle.DAILY_WORKFLOW_CONTRACT,
+            configuration_fingerprint=(
+                vault_coordination.configuration_fingerprint()
+            ),
+            expected_vault=self.vault,
+            expected_run_id=manifest.parent.name,
+        )
         vault_coordination.acquire(
             manifest,
             harness="codex",
@@ -219,11 +326,7 @@ class VaultCoordinationTests(unittest.TestCase):
         )
         daily_output.parent.mkdir(parents=True)
         daily_output.write_text("# 今日锐评\n", encoding="utf-8")
-        run_context.update_manifest(
-            manifest,
-            status="validated",
-            changed_paths=[daily_output],
-        )
+        self._advance_to_publication(manifest, lifecycle, daily_output)
 
         result = vault_coordination.complete(manifest)
 
@@ -238,9 +341,13 @@ class VaultCoordinationTests(unittest.TestCase):
             ).read_text(encoding="utf-8")
         )
         self.assertEqual(state["status"], "success")
-        self.assertEqual(state["changed_paths"], [
-            "DailyPapers/2026-07-26-论文推荐.md"
-        ])
+        self.assertEqual(
+            state["changed_paths"],
+            [
+                "DailyPapers/2026-07-26-论文推荐.md",
+                "DailyPapers/.history.json",
+            ],
+        )
 
         reader = self.root / "reader"
         subprocess.run(
@@ -255,6 +362,15 @@ class VaultCoordinationTests(unittest.TestCase):
 
     def test_completed_date_is_idempotent(self) -> None:
         first_manifest = self._manifest()
+        lifecycle = run_lifecycle.RunLifecycle.open(
+            first_manifest,
+            contract=run_lifecycle.DAILY_WORKFLOW_CONTRACT,
+            configuration_fingerprint=(
+                vault_coordination.configuration_fingerprint()
+            ),
+            expected_vault=self.vault,
+            expected_run_id=first_manifest.parent.name,
+        )
         vault_coordination.acquire(
             first_manifest,
             harness="codex",
@@ -265,10 +381,10 @@ class VaultCoordinationTests(unittest.TestCase):
         )
         daily_output.parent.mkdir(parents=True)
         daily_output.write_text("# 今日锐评\n", encoding="utf-8")
-        run_context.update_manifest(
+        self._advance_to_publication(
             first_manifest,
-            status="validated",
-            changed_paths=[daily_output],
+            lifecycle,
+            daily_output,
         )
         vault_coordination.complete(first_manifest)
 
@@ -282,6 +398,15 @@ class VaultCoordinationTests(unittest.TestCase):
 
     def test_configuration_change_blocks_publication(self) -> None:
         manifest = self._manifest()
+        lifecycle = run_lifecycle.RunLifecycle.open(
+            manifest,
+            contract=run_lifecycle.DAILY_WORKFLOW_CONTRACT,
+            configuration_fingerprint=(
+                vault_coordination.configuration_fingerprint()
+            ),
+            expected_vault=self.vault,
+            expected_run_id=manifest.parent.name,
+        )
         vault_coordination.acquire(
             manifest,
             harness="codex",
@@ -292,11 +417,7 @@ class VaultCoordinationTests(unittest.TestCase):
         )
         daily_output.parent.mkdir(parents=True)
         daily_output.write_text("# 今日锐评\n", encoding="utf-8")
-        run_context.update_manifest(
-            manifest,
-            status="validated",
-            changed_paths=[daily_output],
-        )
+        self._advance_to_publication(manifest, lifecycle, daily_output)
         self._write_config(self.vault, top_n=29)
         user_config.clear_config_cache()
 
@@ -403,7 +524,9 @@ class VaultCoordinationTests(unittest.TestCase):
         run_state.write_text("{}\n", encoding="utf-8")
         self.assertEqual(git(empty_vault, "status", "--porcelain"), "")
 
-    def test_acquire_reloads_vault_config_after_pull(self) -> None:
+    def test_acquire_rejects_manifest_created_before_remote_config_pull(
+        self,
+    ) -> None:
         vault_config = self.vault / ".dailypaper" / "config.json"
         vault_config.parent.mkdir(parents=True)
         initial_config = json.loads(
@@ -472,26 +595,212 @@ class VaultCoordinationTests(unittest.TestCase):
             )
             git(updater, "push", "origin", "main")
 
-            result = vault_coordination.acquire(
-                manifest,
-                harness="claude-code",
-                owner="test-host",
-            )
-            state = json.loads(
-                (
-                    self.vault
-                    / ".dailypaper"
-                    / "tasks"
-                    / "daily-papers.json"
-                ).read_text(encoding="utf-8")
-            )
+            with self.assertRaises(
+                vault_coordination.CoordinationError
+            ) as caught:
+                vault_coordination.acquire(
+                    manifest,
+                    harness="claude-code",
+                    owner="test-host",
+                )
 
-        self.assertEqual(result["status"], "acquired")
         self.assertEqual(user_config.daily_papers_config()["top_n"], 29)
-        self.assertEqual(
-            state["config_sha256"],
-            vault_coordination._config_fingerprint(),
+        self.assertEqual(caught.exception.status, "config-conflict")
+
+    def test_v2_acquire_records_immutable_publication_metadata(self) -> None:
+        manifest, lifecycle = self._v2_manifest()
+
+        result = vault_coordination.acquire(
+            manifest,
+            harness="codex",
+            owner="test-host",
         )
+
+        publication = lifecycle.snapshot().as_dict()["publication"]
+        self.assertEqual(publication["acquisition_commit"], result["lock_commit"])
+        self.assertEqual(publication["remote"], "origin")
+        self.assertEqual(publication["branch"], "main")
+
+    def test_v2_complete_reuses_content_commit_after_failed_push(self) -> None:
+        manifest, lifecycle, _ = self._prepare_v2_publication()
+        acquisition_commit = lifecycle.snapshot().as_dict()["publication"][
+            "acquisition_commit"
+        ]
+        original_git = vault_coordination._git
+        failed_once = False
+
+        def fail_first_content_push(
+            vault: Path,
+            *args: str,
+            check: bool = True,
+        ) -> subprocess.CompletedProcess[str]:
+            nonlocal failed_once
+            if (
+                not failed_once
+                and args
+                and args[0] == "push"
+                and any(":refs/heads/main" in value for value in args)
+            ):
+                failed_once = True
+                return subprocess.CompletedProcess(
+                    ["git", *args],
+                    1,
+                    "",
+                    "simulated lost network",
+                )
+            return original_git(vault, *args, check=check)
+
+        with patch.object(
+            vault_coordination,
+            "_git",
+            side_effect=fail_first_content_push,
+        ):
+            with self.assertRaises(vault_coordination.CoordinationError) as caught:
+                vault_coordination.complete(manifest)
+
+        self.assertEqual(caught.exception.status, "publish-failed")
+        interrupted = lifecycle.snapshot().as_dict()
+        content_commit = interrupted["publication"]["content_commit"]
+        self.assertIsNotNone(content_commit)
+        self.assertEqual(interrupted["condition"], "interrupted")
+        self.assertEqual(
+            git(self.remote, "rev-parse", "refs/heads/main"),
+            acquisition_commit,
+        )
+
+        result = vault_coordination.complete(manifest)
+
+        self.assertEqual(result["content_commit"], content_commit)
+        terminal = lifecycle.snapshot()
+        self.assertEqual(terminal.outcome, "published")
+        self.assertEqual(
+            git(self.remote, "rev-parse", "refs/heads/main"),
+            content_commit,
+        )
+
+    def test_v2_complete_accepts_ambiguous_successful_push(self) -> None:
+        manifest, lifecycle, _ = self._prepare_v2_publication()
+        original_git = vault_coordination._git
+        obscured_once = False
+
+        def obscure_successful_push(
+            vault: Path,
+            *args: str,
+            check: bool = True,
+        ) -> subprocess.CompletedProcess[str]:
+            nonlocal obscured_once
+            if (
+                not obscured_once
+                and args
+                and args[0] == "push"
+                and any(":refs/heads/main" in value for value in args)
+            ):
+                obscured_once = True
+                original_git(vault, *args, check=True)
+                return subprocess.CompletedProcess(
+                    ["git", *args],
+                    1,
+                    "",
+                    "simulated lost response",
+                )
+            return original_git(vault, *args, check=check)
+
+        with patch.object(
+            vault_coordination,
+            "_git",
+            side_effect=obscure_successful_push,
+        ):
+            result = vault_coordination.complete(manifest)
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(lifecycle.snapshot().outcome, "published")
+
+    def test_v2_fail_publishes_failure_then_finishes_manifest(self) -> None:
+        manifest, lifecycle = self._v2_manifest()
+        vault_coordination.acquire(
+            manifest,
+            harness="codex",
+            owner="test-host",
+        )
+
+        result = vault_coordination.fail(
+            manifest,
+            message="deterministic schema failure",
+        )
+
+        self.assertEqual(result["status"], "failed")
+        terminal = lifecycle.snapshot()
+        self.assertEqual(terminal.outcome, "failed")
+        inspected = vault_coordination.inspect_task_state(self.vault)
+        self.assertEqual(inspected["task_state"]["status"], "failed")
+
+    def test_cancel_uses_confirmed_remote_head_and_preserves_local_artifacts(
+        self,
+    ) -> None:
+        manifest, _ = self._v2_manifest()
+        acquired = vault_coordination.acquire(
+            manifest,
+            harness="codex",
+            owner="failed-server",
+        )
+        local_artifact = manifest.parent / "enriched.json"
+        local_artifact.write_text("[]\n", encoding="utf-8")
+        local_head = git(self.vault, "rev-parse", "HEAD")
+
+        proposal = vault_coordination.prepare_cancel(
+            self.vault,
+            acquired["run_id"],
+        )
+        result = vault_coordination.cancel(proposal)
+
+        self.assertEqual(result["status"], "cancelled")
+        self.assertTrue(local_artifact.exists())
+        self.assertEqual(git(self.vault, "rev-parse", "HEAD"), local_head)
+        inspected = vault_coordination.inspect_task_state(self.vault)
+        self.assertEqual(inspected["task_state"]["status"], "cancelled")
+        self.assertEqual(
+            inspected["task_state"]["run_id"],
+            acquired["run_id"],
+        )
+
+    def test_cancel_rejects_a_stale_proposal(self) -> None:
+        manifest, _ = self._v2_manifest()
+        acquired = vault_coordination.acquire(
+            manifest,
+            harness="codex",
+            owner="failed-server",
+        )
+        proposal = vault_coordination.prepare_cancel(
+            self.vault,
+            acquired["run_id"],
+        )
+        updater = self.root / "remote-updater"
+        subprocess.run(
+            ["git", "clone", str(self.remote), str(updater)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        (updater / "unrelated.md").write_text("remote change\n", encoding="utf-8")
+        git(updater, "add", "unrelated.md")
+        git(
+            updater,
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "advance remote",
+        )
+        git(updater, "push", "origin", "main")
+
+        with self.assertRaises(vault_coordination.CoordinationError) as caught:
+            vault_coordination.cancel(proposal)
+
+        self.assertEqual(caught.exception.status, "cancel-stale")
+        inspected = vault_coordination.inspect_task_state(self.vault)
+        self.assertEqual(inspected["task_state"]["status"], "running")
 
 
 if __name__ == "__main__":

@@ -76,16 +76,28 @@ class InstallationTests(unittest.TestCase):
                     ],
                 ]
                 if skill_name == "daily-papers":
-                    commands.append(
+                    commands.extend(
                         [
-                            sys.executable,
-                            str(
-                                installed
-                                / "scripts"
-                                / "daily"
-                                / "fetch_and_score.py"
-                            ),
-                            "--help",
+                            [
+                                sys.executable,
+                                str(
+                                    installed
+                                    / "scripts"
+                                    / "daily"
+                                    / "fetch_and_score.py"
+                                ),
+                                "--help",
+                            ],
+                            [
+                                sys.executable,
+                                str(
+                                    installed
+                                    / "scripts"
+                                    / "shared"
+                                    / "run_coordinator.py"
+                                ),
+                                "--help",
+                            ],
                         ]
                     )
                 if skill_name == "paper-reader":

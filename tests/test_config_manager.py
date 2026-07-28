@@ -181,6 +181,29 @@ class ConfigManagerTests(unittest.TestCase):
             with self.assertRaises(config_manager.ActiveRunError):
                 config_manager.guard_active_run(vault)
 
+    def test_cancelled_run_allows_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault = Path(temp_dir)
+            state_path = vault / ".dailypaper" / "tasks" / "daily-papers.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "task": "daily-papers",
+                        "status": "cancelled",
+                        "run_id": "run-123",
+                        "cancelled_at": "2026-08-01T00:00:00+08:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = config_manager.guard_active_run(vault)
+
+            self.assertEqual(result["status"], "safe")
+            self.assertEqual(result["task_state"], "cancelled")
+
     def test_active_run_blocks_apply_without_changing_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
