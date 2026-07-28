@@ -1,22 +1,19 @@
----
-name: daily-papers-review
-description: |
-  论文点评（3 步流水线的第 2 步）。读取富化后的论文数据，扫描笔记库，生成有态度的推荐点评，
-  保存推荐文件到 Obsidian，更新 history；由父流程统一协调远程 Vault 发布。
-
-  触发词："论文点评"、"跑一下论文点评"
----
-
 > **开始前**: 先说一声 "开始点评论文 🔪" 并告知今天日期。
 
 # 论文点评 (Review + Save)
 
 你是 用户的论文点评系统（3 步流水线的第 2 步）。读取富化数据 → 扫描笔记库 → 生成推荐点评 → 保存到 Obsidian。
 
+## 调用边界
+
+本阶段只接受 `daily-papers` 父流程调用。没有父流程提供的 `RUN_MANIFEST` 或其
+协调状态不是 `acquired` 时立即停止，并引导用户使用公开的每日推荐入口。不得
+自行取得 Vault 锁、提交或推送。
+
 ## Step 0: 读取共享配置
 
-将本 `SKILL.md` 所在目录的父目录解析为绝对路径 `SKILLS_ROOT`。读取
-`{SKILLS_ROOT}/_shared/user-config.json` 和可选的 `user-config.local.json`。
+使用公开 Skill 已解析的 `SKILL_ROOT`。读取
+`{SKILL_ROOT}/scripts/shared/user-config.json` 和可选的 `user-config.local.json`。
 
 显式生成并在后续统一使用这些变量：
 
@@ -49,7 +46,7 @@ description: |
 4. 检查通过后运行：
 
    ```bash
-   python3 "{SKILLS_ROOT}/_shared/run_context.py" update "{RUN_MANIFEST}" \
+   python3 "{SKILL_ROOT}/scripts/shared/run_context.py" update "{RUN_MANIFEST}" \
      --status reviewing
    ```
 
@@ -241,7 +238,7 @@ tags: [daily-papers, auto-generated]
 1. **更新历史记录**：
    - 优先运行确定性脚本：
      ```bash
-     python3 "{SKILLS_ROOT}/daily-papers-review/update_history.py" \
+     python3 "{SKILL_ROOT}/scripts/review/update_history.py" \
        --from-recommendation "{DAILY_PAPERS_PATH}/YYYY-MM-DD-论文推荐.md" \
        --date YYYY-MM-DD
      ```
@@ -261,7 +258,7 @@ tags: [daily-papers, auto-generated]
    `CHANGED_PATHS` 列表，并同步写入 manifest：
 
    ```bash
-   python3 "{SKILLS_ROOT}/_shared/run_context.py" update "{RUN_MANIFEST}" \
+   python3 "{SKILL_ROOT}/scripts/shared/run_context.py" update "{RUN_MANIFEST}" \
      --changed-path "DailyPapers/YYYY-MM-DD-论文推荐.md" \
      --changed-path "DailyPapers/.history.json"
    ```
@@ -274,10 +271,12 @@ tags: [daily-papers, auto-generated]
 完成后告知用户：
 - 推荐了多少篇论文
 - 必读/值得看/可跳过各多少篇
-- 提示运行下一步：`跑一下论文笔记`
+- 把控制权返回父 workflow，由父流程继续执行 notes 阶段；不得要求用户另行调用
+  内部阶段
 
 ## 注意事项
 
-- 如果 manifest 或 `ENRICHED_INPUT` 不存在，必须先运行 `跑一下论文抓取`
+- 如果 manifest 或 `ENRICHED_INPUT` 不存在，立即返回父 workflow 并报告 fetch
+  阶段产物缺失
 - 不生成论文笔记、不补充概念库（那是第 3 步的事）
 - 不做 git commit / push

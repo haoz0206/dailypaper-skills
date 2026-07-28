@@ -1,22 +1,17 @@
----
-name: daily-papers-notes
-description: |
-  论文笔记生成（3 步流水线的第 3 步）。补充概念库，为推荐论文生成完整笔记，
-  链接回填到推荐文件；目录页默认自动刷新，由父流程统一协调远程 Vault 发布。
-
-  触发词："批量笔记"、"跑一下论文笔记"
----
-
-> **开始前**: 先说一声 "开始整理笔记 📝" 并告知今天日期。
-
 # 论文笔记 (Concepts + Notes + Backfill)
 
 你是 用户的论文笔记系统（3 步流水线的第 3 步）。补充概念库 → 生成论文笔记 → 链接回填 → 刷新目录页。
 
+## 调用边界
+
+本阶段只接受 `daily-papers` 父流程调用。没有父流程提供的 `RUN_MANIFEST` 或其
+协调状态不是 `acquired` 时立即停止，并引导用户使用公开入口。阶段本身保持父
+流程的任务所有权；Subagent 只允许逐篇写论文内容，不得操作协调状态或 Git。
+
 ## Step 0: 读取共享配置
 
-将本 `SKILL.md` 所在目录的父目录解析为绝对路径 `SKILLS_ROOT`。读取
-`{SKILLS_ROOT}/_shared/user-config.json` 和可选的 `user-config.local.json`。
+使用公开 Skill 已解析的 `SKILL_ROOT`。读取
+`{SKILL_ROOT}/scripts/shared/user-config.json` 和可选的 `user-config.local.json`。
 
 显式生成并在后续统一使用这些变量：
 
@@ -37,6 +32,9 @@ description: |
 - `CONCEPTS_PATH = {NOTES_PATH}/{concepts_folder}`
 - `DAILY_PAPERS_PATH = {VAULT_PATH}/{daily_papers_folder}`
 - `GIT_PUSH_ENABLED` 只有在 `GIT_COMMIT_ENABLED=true` 时才可能为真
+- `GIT_COMMIT_ENABLED` 和 `GIT_PUSH_ENABLED` 只控制 `paper-reader` 等独立
+  调用；本协调流水线取得所有权后，始终由 `vault_coordination.py complete`
+  按原子发布契约提交并 push，内部阶段不得用这两个开关绕过或重复发布
 
 后续步骤统一使用上面的变量。
 
@@ -46,10 +44,11 @@ description: |
 2. 确认 `RUN_MANIFEST.coordination.status` 是 `acquired`
 3. 检查今天的推荐文件 `{DAILY_PAPERS_PATH}/YYYY-MM-DD-论文推荐.md` 是否存在
 4. 如果任一不存在或未取得所有权，告知用户需要从每日入口启动，然后停止
-5. 检查通过后运行：
+5. 全部检查通过后，才说一声“开始整理笔记 📝”并告知今天日期
+6. 然后运行：
 
    ```bash
-   python3 "{SKILLS_ROOT}/_shared/run_context.py" update "{RUN_MANIFEST}" \
+   python3 "{SKILL_ROOT}/scripts/shared/run_context.py" update "{RUN_MANIFEST}" \
      --status writing-notes
    ```
 
@@ -72,9 +71,9 @@ description: |
 **1c: 创建缺失的概念笔记（自动归类）**
 检查 `{CONCEPTS_PATH}/` 下是否已存在（搜索所有子目录）。对于缺失的概念，**根据概念类型自动归类到对应子目录**，不要全扔 `0-待分类/`。
 
-分类规则见 `{SKILLS_ROOT}/paper-reader/references/concept-categories.md`
+分类规则见 `{SKILL_ROOT}/references/paper-reader/concept-categories.md`
 
-概念笔记模板见 `{SKILLS_ROOT}/paper-reader/references/concept-categories.md`
+概念笔记模板见 `{SKILL_ROOT}/references/paper-reader/concept-categories.md`
 
 ### Step 2: 论文笔记生成
 
@@ -83,11 +82,18 @@ description: |
 1. 从今天的推荐文件中，读取分流表，筛选出标记为"必读"的论文（"值得看"和"可跳过"的不生成笔记）
 2. **质量检查已有笔记**（不是只看文件是否存在）：
    - 对已有 `📒 **笔记**` 标记的论文，扫描笔记目录找到对应文件并检查行数
-   - **行数 < 100 的视为骨架笔记，必须重新生成**（删除旧文件，重新调用 paper-reader）
-   - 行数 >= 100 且包含 `## 关键公式` 和 `## 关键图表` 的才算合格，可以跳过
-3. 对每篇需要生成/重新生成的论文，读取并执行
-   `{SKILLS_ROOT}/paper-reader/SKILL.md`，传入 arXiv 链接，并明确设置
-   `DAILYPAPER_PARENT_RUN=true`，禁止它独立提交 Git
+   - 使用与“生成后质量验证”完全相同的标准：行数、公式、图片和必需 section
+     任一不合格都视为骨架笔记，必须重新调用 paper-reader 生成
+   - 只有同时满足下方全部硬性验证条件时才算合格，可以跳过
+3. 按推荐文件顺序**逐篇**处理需要生成/重新生成的论文，禁止多个写入者并行修改
+   同一 Vault。读取并执行 `{SKILL_ROOT}/workflows/paper-reader.md`，传入 arXiv
+   链接，并明确设置 `DAILYPAPER_PARENT_RUN=true`，禁止它独立提交 Git。
+   - 当前 Harness 支持 Subagent 时，为当前论文启动恰好一个 Subagent，等待其
+     写入和自检完成后再处理下一篇；不支持时在当前上下文内执行相同步骤
+   - 向 Subagent 传递同一个 `RUN_MANIFEST` 仅供读取上下文，明确禁止它修改
+     manifest、取得或释放 Vault 锁、运行 Git add/commit/push
+   - Subagent 必须返回实际笔记路径、概念/资源变更路径和质量检查结果；父阶段
+     逐项验证后才能继续
    - **不要指定固定的输出路径**，让 paper-reader 自行决定文件名和分类目录
    - paper-reader 会用方法名缩写作为文件名（如 `DAPL.md`），并自动分类到正确子目录
    - 完成后扫描笔记目录，找到实际生成的文件路径和文件名，记录下来供 Step 3 回填
@@ -101,7 +107,8 @@ description: |
 
 **绝对禁止自己手写简化版笔记。每篇论文必须通过 `paper-reader` skill 生成。**
 不要因为"怕 context overflow"或"论文太多"就自己写个 70 行的骨架糊弄过去。
-如果当前会话上下文接近上限，可以开启同一 harness 的新会话继续剩余论文；但不能跳过任何一篇必读论文。
+如果当前会话上下文接近上限，优先按上面的 Subagent 约定隔离逐篇阅读；Subagent
+不可用时才开启同一 Harness 的新会话继续剩余论文。不能跳过任何一篇必读论文。
 
 笔记质量由 paper-reader skill 自身保证（模板、公式、图片、概念链接等规则均在 paper-reader 中定义）。
 
@@ -111,7 +118,7 @@ description: |
 1. 文件行数 >= 120（低于此值说明内容不完整）
 2. 包含 `$$` 或 `$` LaTeX 公式（至少 2 处）
 3. 包含 `![` 图片引用（至少 1 张）
-4. 包含 `## 关键公式` 和 `## 实验结果` section header
+4. 包含 `## 关键公式`、`## 关键图表` 和 `## 实验结果` section header
 5. 如果任一条件不满足，**删除文件并重新生成**
 
 ### Step 3: 笔记链接回填
@@ -121,7 +128,7 @@ description: |
 优先运行确定性脚本：
 
 ```bash
-python3 "{SKILLS_ROOT}/daily-papers-notes/backfill_links.py" \
+python3 "{SKILL_ROOT}/scripts/notes/backfill_links.py" \
   --recommendation "{DAILY_PAPERS_PATH}/YYYY-MM-DD-论文推荐.md" \
   --notes-dir "{NOTES_PATH}"
 ```
@@ -165,8 +172,8 @@ paper-reader 生成笔记时会自行决定文件名（通常用方法名缩写�
 只有在 `AUTO_REFRESH_INDEXES=true` 时才执行：
 
 ```bash
-python3 "{SKILLS_ROOT}/_shared/generate_concept_mocs.py"
-python3 "{SKILLS_ROOT}/_shared/generate_paper_mocs.py"
+python3 "{SKILL_ROOT}/scripts/shared/generate_concept_mocs.py"
+python3 "{SKILL_ROOT}/scripts/shared/generate_paper_mocs.py"
 ```
 
 默认配置下这个开关是开启的，所以新增的概念和论文笔记通常会自动反映到各分类目录页中。
@@ -179,7 +186,7 @@ python3 "{SKILLS_ROOT}/_shared/generate_paper_mocs.py"
    参数登记；该参数可重复传入：
 
    ```bash
-   python3 "{SKILLS_ROOT}/_shared/run_context.py" update "{RUN_MANIFEST}" \
+   python3 "{SKILL_ROOT}/scripts/shared/run_context.py" update "{RUN_MANIFEST}" \
      --changed-path "{paper_notes_folder}/实际生成的笔记.md"
    ```
 
@@ -187,14 +194,14 @@ python3 "{SKILLS_ROOT}/_shared/generate_paper_mocs.py"
    `changed_paths` 为唯一来源：
 
    ```bash
-   python3 "{SKILLS_ROOT}/_shared/run_context.py" update "{RUN_MANIFEST}" \
+   python3 "{SKILL_ROOT}/scripts/shared/run_context.py" update "{RUN_MANIFEST}" \
      --status validated
    ```
 
 4. 调用确定性协调器完成任务状态校验、精确暂存、单一内容 commit 和 push：
 
    ```bash
-   python3 "{SKILLS_ROOT}/_shared/vault_coordination.py" complete \
+   python3 "{SKILL_ROOT}/scripts/shared/vault_coordination.py" complete \
      "{RUN_MANIFEST}"
    ```
 

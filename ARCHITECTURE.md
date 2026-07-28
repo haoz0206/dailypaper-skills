@@ -7,17 +7,19 @@
 ```
 用户说一句话
     │
-    ├─ "今日论文推荐" ──→ daily-papers（编排器）
-    │                        ├─ Step 1: daily-papers-fetch（Python，零 token）
-    │                        ├─ Step 2: daily-papers-review（当前 agent 点评）
-    │                        └─ Step 3: daily-papers-notes（当前 agent + paper-reader）
-    │
-    ├─ "读一下这篇论文" ──→ paper-reader（独立 skill）
-    │
-    └─ "更新索引" ──→ generate-mocs（Python 脚本）
+    └─ daily-papers（唯一公开 Skill，按意图路由）
+         ├─ "今日论文推荐" ──→ workflows/daily.md
+         │                       ├─ fetch.md（Python，零 token）
+         │                       ├─ review.md（当前 agent 点评）
+         │                       └─ notes.md（当前 agent + paper-reader workflow）
+         ├─ "读一下这篇论文" ──→ workflows/paper-reader.md
+         ├─ "更新索引" ──→ workflows/generate-mocs.md
+         └─ "配置每日论文" ──→ workflows/configure.md
 ```
 
-三步流水线的设计主要是为了控制单次上下文长度。入口首先创建独立
+整个 `skills/daily-papers/` 是一个自包含的深模块：安装器只发现根
+`SKILL.md`，内部 workflow、脚本、模板和参考资料随目录一起安装。三步流水线的
+设计主要是为了控制单次上下文长度。入口首先创建独立
 `RunManifest`，三个阶段通过 manifest 中的运行级 JSON 路径传递数据，避免并发和失败
 重跑读到其他任务的文件。
 
@@ -33,7 +35,7 @@ pull，并且只有缺失 bootstrap 文件时才再提交，所以可幂等调�
 
 ---
 
-## Step 1: daily-papers-fetch
+## Step 1: fetch workflow
 
 **纯 Python，不消耗模型 token。**
 
@@ -73,7 +75,7 @@ pull，并且只有缺失 bootstrap 文件时才再提交，所以可幂等调�
 
 ---
 
-## Step 2: daily-papers-review
+## Step 2: review workflow
 
 **当前 agent 主导，读候选列表写点评。**
 
@@ -102,9 +104,9 @@ pull，并且只有缺失 bootstrap 文件时才再提交，所以可幂等调�
 
 ---
 
-## Step 3: daily-papers-notes
+## Step 3: notes workflow
 
-**当前 agent 编排 + 多次调用 paper-reader。**
+**当前 agent 编排 + 多次执行 paper-reader workflow。**
 
 ### 3.1 概念库补充
 
@@ -117,7 +119,7 @@ pull，并且只有缺失 bootstrap 文件时才再提交，所以可幂等调�
 
 - 只为"🔥 必读"论文生成完整笔记
 - 已有笔记如果 < 100 行或缺少关键 section → 删除重新生成
-- 逐篇调用 paper-reader skill
+- 逐篇执行 paper-reader workflow
 
 质量校验（每篇）：
 - 文件 ≥ 120 行
@@ -140,9 +142,9 @@ pull，并且只有缺失 bootstrap 文件时才再提交，所以可幂等调�
 
 ---
 
-## paper-reader
+## paper-reader workflow
 
-**作为独立 Skill 运行，使用宿主当前可用的文件、命令和网络能力。**
+**既可由 suite 路由为单篇公开请求，也可由 notes workflow 内部调用。**
 
 ### 输入源
 
@@ -218,7 +220,7 @@ python3 paper_daemon.py --list       # 列出所有分类
 
 ---
 
-## generate-mocs
+## generate-mocs workflow
 
 **纯 Python，递归扫目录生成索引页。**
 
@@ -235,7 +237,7 @@ python3 paper_daemon.py --list       # 列出所有分类
 
 ---
 
-## _shared 公共模块
+## scripts/shared 公共模块
 
 ### user-config.json
 

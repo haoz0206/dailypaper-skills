@@ -34,7 +34,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-_SHARED_DIR = Path(__file__).resolve().parents[1] / "_shared"
+_SHARED_DIR = Path(__file__).resolve().parents[1] / "shared"
 if str(_SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(_SHARED_DIR))
 

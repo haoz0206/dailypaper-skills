@@ -1,6 +1,0 @@
-interface:
-  display_name: "Paper Reader"
-  short_description: "Read academic papers and create structured Obsidian notes"
-  default_prompt: "Use $paper-reader to analyze this paper and save a structured note."
-policy:
-  allow_implicit_invocation: true

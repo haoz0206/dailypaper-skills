@@ -1,6 +1,0 @@
-interface:
-  display_name: "Daily Papers Notes"
-  short_description: "Create required paper notes and finalize the daily run"
-  default_prompt: "Use $daily-papers-notes to complete notes for a prepared daily run."
-policy:
-  allow_implicit_invocation: false

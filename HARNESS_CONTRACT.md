@@ -1,9 +1,8 @@
 # Harness-independent workflow contract
 
 This document defines the user-visible interface shared by the Claude Code and
-Codex adapters. The unified branch stores both adapters in one checkout:
-portable `SKILL.md` frontmatter for both harnesses and Codex
-`agents/openai.yaml` metadata beside it. Runtime adapters may change explicit
+Codex adapters. The unified branch uses portable `SKILL.md` metadata and one
+shared workflow for both harnesses. Runtime adapters may change explicit
 invocation syntax and CLI flags, but must not change the inputs and outputs
 below.
 
@@ -29,6 +28,15 @@ Index workflow:
 
 ```text
 更新索引
+```
+
+Configuration workflow:
+
+```text
+查看当前每日论文配置
+配置每日论文
+把研究方向改成 VLA 和 robot learning
+只抓取 cs.RO 和 cs.CV，每天推荐 15 篇
 ```
 
 Harness-specific forms such as `/daily-papers` or `$daily-papers` are optional
@@ -82,6 +90,35 @@ identity is runtime metadata; it does not select a skills Git branch.
 Skills only. A full daily run always uses the acquisition and publication
 commits required by the coordination protocol.
 
+### Shared configuration mutation
+
+The configuration workflow inside the public `daily-papers` Skill is the
+canonical natural-language adapter for shared configuration. Both Harnesses
+must map the same request to the same supported fields and deterministic
+validator. It may update:
+
+- `daily_papers.keywords`
+- `daily_papers.negative_keywords`
+- `daily_papers.domain_boost_keywords`
+- `daily_papers.arxiv_categories`
+- `daily_papers.min_score`
+- `daily_papers.top_n`
+- `automation.auto_refresh_indexes`
+
+It must reject unknown or currently inert fields rather than writing settings
+that the workflow does not consume. Shared keyword lists are lowercase,
+trimmed, de-duplicated, and conflict-checked. `paths.obsidian_vault` remains
+`.`; absolute clone paths and credentials never enter the shared file.
+
+Before a configuration write, the adapter fast-forward pulls `origin/main`,
+requires a clean Vault, and reads `.dailypaper/tasks/daily-papers.json`. A
+`running` daily task blocks configuration changes. The deterministic apply
+helper repeats this guard immediately before atomically replacing the config,
+so a run acquired after preview also blocks the write. A successful update
+writes, stages, commits, and pushes only `.dailypaper/config.json`; push
+rejection must not trigger automatic rebase or force push. Configuration
+helpers never edit the task document or per-run manifests.
+
 ## Stable outputs
 
 With the default configuration, both adapters write:
@@ -129,7 +166,7 @@ The split table uses method/model-name wikilinks and the three stable levels
 ### Paper-note schema
 
 Paper notes keep the frontmatter keys defined in
-`skills/paper-reader/assets/paper-note-template.md`, including `title`,
+`skills/daily-papers/assets/paper-note-template.md`, including `title`,
 `method_name`, `authors`, `year`, `venue`, `tags`, `zotero_collection`,
 `image_source`, `arxiv_html`, and `created`. Non-Zotero inputs write an empty
 `zotero_collection`.
@@ -200,11 +237,23 @@ Git automation has the same observable result on both harnesses:
 
 ## Allowed runtime adapter differences
 
-- Skill discovery directory and metadata.
+- Skill discovery and installation directory.
 - Explicit invocation syntax.
 - Harness permission and sandbox flags.
 - Host-specific file, command, and network tool wording.
 - Internal orchestration used to reach the shared workflow.
+
+## Installable package boundary
+
+The repository exposes exactly one installer-visible Skill:
+`skills/daily-papers/SKILL.md`. Its `workflows/`, `scripts/`, `assets/`, and
+`references/` directories are bundled implementation resources. Fetch, review,
+notes, paper-reader, MOC, and configuration workflows are not sibling Skills
+and must not be independently discovered or installed.
+
+An installed copy must run without the source repository or any sibling
+directory. Harness identity is selected at runtime; installers do not select a
+Claude-specific or Codex-specific Git branch.
 
 Changes to default research keywords, output directories, note templates,
 scoring rules, or generated Markdown require a shared workflow change in the
@@ -212,7 +261,9 @@ single unified branch.
 
 ## Adapter validation
 
-Every Skill keeps frontmatter accepted by both harnesses and valid
-`agents/openai.yaml` metadata for Codex. Claude Code ignores the Codex metadata.
-Both adapters call the same Python run context and Vault coordination scripts;
-they do not reimplement Git safety in natural-language instructions.
+The public Skill keeps only portable `name` and `description` frontmatter and has no
+vendor-specific sidecar metadata. When supported, `paper-reader` requests one
+Subagent through portable workflow instructions; otherwise it runs inline.
+Subagents never own the Vault lock, manifest, or Git publication. Both
+Harnesses call the same Python run context and Vault coordination scripts; they
+do not reimplement Git safety in natural-language instructions.

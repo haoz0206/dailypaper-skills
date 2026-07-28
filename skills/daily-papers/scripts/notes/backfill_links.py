@@ -22,7 +22,7 @@ import re
 import sys
 from pathlib import Path
 
-_SHARED_DIR = Path(__file__).resolve().parent.parent / "_shared"
+_SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
 if str(_SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(_SHARED_DIR))
 

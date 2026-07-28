@@ -9,7 +9,8 @@ from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SHARED_DIR = REPO_ROOT / "skills" / "_shared"
+SUITE_ROOT = REPO_ROOT / "skills" / "daily-papers"
+SHARED_DIR = SUITE_ROOT / "scripts" / "shared"
 if str(SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(SHARED_DIR))
 
@@ -53,7 +54,9 @@ class HistoryAndLinksTests(unittest.TestCase):
                     "update_history_under_test",
                     REPO_ROOT
                     / "skills"
-                    / "daily-papers-review"
+                    / "daily-papers"
+                    / "scripts"
+                    / "review"
                     / "update_history.py",
                 )
                 module.update_history(
@@ -88,7 +91,9 @@ class HistoryAndLinksTests(unittest.TestCase):
                     "backfill_links_under_test",
                     REPO_ROOT
                     / "skills"
-                    / "daily-papers-notes"
+                    / "daily-papers"
+                    / "scripts"
+                    / "notes"
                     / "backfill_links.py",
                 )
                 index = module.scan_notes(

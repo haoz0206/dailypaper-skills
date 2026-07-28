@@ -1,6 +1,0 @@
-interface:
-  display_name: "Daily Papers"
-  short_description: "Fetch, review, and save daily research papers to Obsidian"
-  default_prompt: "Use $daily-papers to generate today's paper recommendations and validated notes."
-policy:
-  allow_implicit_invocation: true

@@ -11,9 +11,9 @@
 
 如果你也有“每天想看看新论文，但不想每天从一堆页面里手动捞”的痛苦，这个仓库大概就是为这种场景准备的。
 
-> **统一 harness 分支**
-> 当前分支同时包含 Claude Code 可读取的 `SKILL.md` 和 Codex 使用的
-> `agents/openai.yaml`，日常不需要为 harness 切换 Git 分支。
+> **统一 Harness 分支**
+> 当前分支只使用 Agent Skills 的可移植 `SKILL.md` 接口。Claude Code、Codex
+> 和兼容的第三方安装器读取同一套 workflow，日常不需要切换 Git 分支。
 
 > **🧩 顺手推荐**
 > 如果你主要在 Zotero 里读 PDF，可以搭配我另一个插件 [Zotero AI Sidebar](https://github.com/huangkiki/zotero-ai-sidebar)。这个插件是在 Zotero 右侧加一个 AI 侧栏，适合边读边问、点译、全文翻译、截图追问、写回 Zotero 笔记。
@@ -43,9 +43,9 @@
 
 | 项目 | Claude Code | Codex |
 | --- | --- | --- |
-| Skill 安装 | `~/.claude/skills` | `~/.agents/skills` 或项目级 `.agents/skills` |
+| Skill 安装 | `npx skills add ... -a claude-code` | `npx skills add ... -a codex` |
 | 显式调用 | `/daily-papers` | `$daily-papers` |
-| Skill 元数据 | `SKILL.md` 的共同 frontmatter | 同一目录下的 `agents/openai.yaml` |
+| Skill 元数据 | 标准 `SKILL.md` | 同一份标准 `SKILL.md` |
 | 协调身份 | `claude-code` | `codex` |
 | Vault 默认根目录 | 当前 Git 仓库根目录 `"."` | 相同 |
 | 中间数据 | `.dailypaper/runs/<run-id>/` 隔离 manifest | 相同 |
@@ -53,8 +53,8 @@
 | 非 Zotero 单篇输入 | 不访问 Zotero，无法分类时写 `_待整理/` | 相同 |
 
 两个 harness 从同一 checkout 读取 workflow，都会验证固定 Vault 远程，并通过任务
-状态文档原子取得同日写入权。应统一使用自然语言入口；显式调用、安装路径和元数据仍
-属于运行时 adapter 差异。完整契约见
+状态文档原子取得同日写入权。应统一使用自然语言入口；显式调用、安装目标和 CLI
+参数仍属于运行时 adapter 差异。完整契约见
 [HARNESS_CONTRACT.md](HARNESS_CONTRACT.md)。
 
 ## ✨ 它会帮你做什么
@@ -98,6 +98,18 @@
 过去一周论文推荐
 ```
 
+查看或调整整套 workflow 的共享配置：
+
+```text
+查看当前每日论文配置
+把研究方向改成 VLA、robot learning 和 diffusion policy
+只抓取 cs.RO、cs.CV 和 cs.AI，每天推荐 15 篇
+```
+
+这些请求由 `daily-papers` 内部的配置 workflow 处理。它会先同步 Vault、检查是否
+有正在运行的日报，再预览和校验 `.dailypaper/config.json`；配置更新只提交这个
+文件。
+
 读单篇论文：
 
 ```text
@@ -137,12 +149,10 @@
 /workspace/dailypaper-vault
 ```
 
-首次部署并把同一份 skills 安装到两个 harness 的用户级目录：
+首次部署时先准备持久化 Vault，再用通用安装器把唯一公开的 `daily-papers` Skill
+安装到两个 harness：
 
 ```bash
-git clone --branch codex/unified-harness \
-  git@github.com:haoz0206/dailypaper-skills.git \
-  /workspace/dailypaper-skills
 git clone \
   git@github.com:haoz0206/dailypaper-vault.git \
   /workspace/dailypaper-vault
@@ -150,19 +160,26 @@ git clone \
 export DAILYPAPER_VAULT=/workspace/dailypaper-vault
 export DAILYPAPER_CONFIG=/workspace/dailypaper-vault/.dailypaper/config.json
 
-python3 /workspace/dailypaper-skills/skills/_shared/vault_coordination.py \
-  bootstrap --vault /workspace/dailypaper-vault
-
-mkdir -p ~/.claude/skills
-cp -R /workspace/dailypaper-skills/skills/. ~/.claude/skills/
-
-mkdir -p ~/.agents/skills
-cp -R /workspace/dailypaper-skills/skills/. ~/.agents/skills/
+npx skills add \
+  "https://github.com/haoz0206/dailypaper-skills.git#codex%2Funified-harness" \
+  --skill daily-papers \
+  --agent claude-code codex \
+  --global --copy --yes
 ```
 
-`bootstrap` 可以安全重复执行。对于当前这样的空 Vault 远程，它会创建并推送首个
-`main` 提交，其中只有可移植的 `.dailypaper/config.json` 和忽略本地 run manifest
-的 `.gitignore`；已有初始化提交时，它先 `pull --ff-only`，再只补齐缺失文件。
+这里显式使用 `--copy`，让每个 harness 得到完整、自包含的目录，不依赖仓库外部
+兄弟 Skill 或跨目录符号链接。首次执行 `今日论文推荐` 时会自动、幂等地 bootstrap
+Vault。空远程会创建并推送首个 `main` 提交，其中只有可移植配置和忽略本地 run
+manifest 的 `.gitignore`；已有提交时会先 `pull --ff-only`。
+
+如果是在开发 checkout 中验证尚未发布的改动，可以把安装源换成本地路径：
+
+```bash
+npx skills add /workspace/dailypaper-skills \
+  --skill daily-papers \
+  --agent claude-code codex \
+  --copy --yes
+```
 
 `/workspace/dailypaper-vault` 是 per-machine 配置：把这两个环境变量写进定时任务或
 服务环境，不要把绝对路径提交到 Vault。已跟踪配置保持
@@ -174,41 +191,53 @@ cp -R /workspace/dailypaper-skills/skills/. ~/.agents/skills/
 
 ## 配置
 
-安装后，两套 harness 各有一份相同的默认配置：
+安装后，完整默认配置位于各自安装的 suite 内，例如：
 
 ```text
-~/.claude/skills/_shared/user-config.json
-~/.agents/skills/_shared/user-config.json
+~/.claude/skills/daily-papers/scripts/shared/user-config.json
+~/.agents/skills/daily-papers/scripts/shared/user-config.json
 ```
 
-推荐把共享配置提交到 Vault 的 `.dailypaper/config.json`，并在定时环境中设置：
+不要直接把个人设置写进安装包默认值。推荐把共享配置提交到 Vault 的
+`.dailypaper/config.json`，并在定时环境中设置：
 
 ```bash
 export DAILYPAPER_VAULT=/workspace/dailypaper-vault
 export DAILYPAPER_CONFIG="$DAILYPAPER_VAULT/.dailypaper/config.json"
 ```
 
-你可以自己改，也可以直接让当前 harness 帮你改，比如：
+研究范围等共享设置通过 `daily-papers` 的配置入口修改，例如：
 
 ```text
-帮我配置 dailypaper-skills。我的 Obsidian 库在 XXX，研究方向是 robot learning、VLA、diffusion policy。
+查看当前每日论文配置
+把研究方向改成 robot learning、VLA、diffusion policy
+只检索 cs.RO、cs.CV 和 cs.AI，每天推荐 15 篇
 ```
 
-主要会改这几项：
+配置 workflow 只管理当前实现真正支持的共享字段，并在原子替换文件前再次检查
+远程任务状态。主要字段是：
 
 | 配置项 | 说明 |
 | --- | --- |
-| `paths.obsidian_vault` | 你的 Obsidian 库路径 |
-| `paths.zotero_db` | Zotero 数据库路径，不用 Zotero 可以留空 |
-| `paths.zotero_storage` | Zotero 附件存储路径 |
+| `daily_papers.arxiv_categories` | arXiv API 的硬分类范围，分类之间使用 OR |
 | `daily_papers.keywords` | 你关心的研究方向，用来给论文加分 |
-| `daily_papers.negative_keywords` | 你不想看的方向 |
+| `daily_papers.negative_keywords` | 标题或摘要命中后直接排除 |
 | `daily_papers.domain_boost_keywords` | 额外加分的领域词 |
-| `runtime.timezone` | 固定使用 `Asia/Shanghai` 判断日报日期 |
-| `repository.url` | 固定 Vault 远程仓库 |
-| `repository.task_state_file` | 跨机器/跨 harness 任务状态文档 |
+| `daily_papers.min_score` | 进入最终候选列表的最低分 |
+| `daily_papers.top_n` | 每天保留数量，多日调用当前会乘以天数 |
+| `automation.auto_refresh_indexes` | 生成内容后是否刷新 Obsidian MOC |
 
-Zotero 分类批量阅读不需要你另外写映射文件。只要 `paths.zotero_db` 和 `paths.zotero_storage` 配好，脚本会直接从 Zotero 分类树里查。
+`DAILYPAPER_VAULT`、Zotero 数据库位置、SSH key 和 Harness 安装路径都是
+per-machine 设置，不由共享配置 workflow 写入 Vault。共享配置中的
+`paths.obsidian_vault` 始终保持 `"."`。
+
+严格只抓某个 calendar day、自定义 arXiv API query 或 `max_results` 当前还不是
+受支持配置；配置 workflow 会报告需要修改实现，而不会写入一个无效字段。
+
+Zotero 分类批量阅读不需要另外写映射文件。需要时，在当前 harness 安装目录的
+`scripts/shared/user-config.local.json` 中配置 `paths.zotero_db` 和
+`paths.zotero_storage`；不要把这两个机器路径写进 Vault 的共享配置。不使用
+Zotero 时无需创建该文件，日报和普通 arXiv/本地 PDF 阅读都不会打开 SQLite。
 
 批量阅读守护进程在同时安装两个 CLI 的机器上必须显式指定 harness：
 
@@ -249,19 +278,16 @@ Zotero AI Sidebar 更适合在读 PDF 的时候用：
 
 1. **抓取**：从 HuggingFace Daily、Trending 和 arXiv API 抓候选论文，按你的关键词打分去重。
 2. **点评**：当前 harness 读候选列表，分成“必读 / 值得看 / 可跳过”，写到 Obsidian 的 `DailyPapers/` 目录。
-3. **笔记**：对“必读”论文逐篇调用 `paper-reader`，生成完整论文笔记，补概念库，再刷新目录页。
+3. **笔记**：对“必读”论文逐篇执行内部 paper-reader workflow，生成完整论文笔记，补概念库，再刷新目录页。
 
-正常不用手动跑这三步。如果你只是想调试某一步，也可以说：
+三个阶段是 suite 内部实现，不是独立安装或用户调用入口。维护者单阶段调试时也
+必须提供已经取得任务所有权的 run manifest。
 
-```text
-跑一下论文抓取
-跑一下论文点评
-跑一下论文笔记
-```
-
-`读一下这篇论文 ...` 走的是 `paper-reader`。它支持 arXiv 链接、本地 PDF、Zotero 搜索和 Zotero 分类。生成笔记时会尽量从 arXiv HTML、项目主页和 PDF 里把图表找出来，写完后还会检查图片链接，坏掉的外链会尽量下载到本地。
-
-`更新索引` 走的是 `generate-mocs`，会递归扫描论文笔记和概念库，生成 Obsidian 可用的目录页。
+`读一下这篇论文 ...` 走内部 paper-reader workflow，支持 arXiv 链接、本地 PDF、
+显式 Zotero 搜索和 Zotero 分类；普通 arXiv/PDF 输入不会访问 Zotero SQLite。
+`更新索引` 走内部 MOC workflow。`查看/修改每日论文配置` 走内部配置 workflow，
+字段白名单、关键词规范化、冲突检查、arXiv 分类、阈值和原子写入均由确定性脚本
+校验；存在 `running` 日报时拒绝修改。
 
 更多实现细节见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
@@ -287,25 +313,24 @@ Zotero AI Sidebar 更适合在读 PDF 的时候用：
 
 ```text
 skills/
-├── daily-papers/          # 每日推荐总入口
-├── paper-reader/          # 单篇论文阅读与笔记生成
-├── generate-mocs/         # Obsidian 目录页生成
-├── daily-papers-fetch/    # 内部：抓取候选论文
-├── daily-papers-review/   # 内部：生成推荐点评
-├── daily-papers-notes/    # 内部：生成重点论文笔记
-└── _shared/               # 共享配置和索引脚本
+└── daily-papers/
+    ├── SKILL.md            # 唯一公开、可安装入口
+    ├── workflows/          # 日报、阅读、MOC、配置及三个内部阶段
+    ├── scripts/            # 确定性实现与 shared runtime
+    ├── assets/             # 论文笔记模板
+    └── references/         # 阅读质量与 Zotero 参考
 
 obsidian-templates/
 └── 论文笔记模板.md
 ```
 
-日常真正会直接用到的，基本就是：
+安装器只会发现 `daily-papers` 一个 Skill。它根据自然语言路由到日报、单篇阅读、
+索引或配置 workflow；抓取、点评和笔记阶段要求父流程提供已取得任务所有权的
+`RUN_MANIFEST`。
 
-- `daily-papers`
-- `paper-reader`
-- `generate-mocs`
-
-另外几个是流水线内部拆出来的步骤，主要方便调试和重跑。
+`paper-reader` 不依赖厂商专属的 fork 配置：当前 Harness 支持 Subagent 时，prompt
+会要求把每篇论文委派给恰好一个 Subagent 并等待完成；不支持时执行相同的 inline
+流程。Vault 锁、manifest 和 Git 发布始终由父流程负责。
 
 ## FAQ
 

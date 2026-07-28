@@ -1,6 +1,0 @@
-interface:
-  display_name: "Daily Papers Fetch"
-  short_description: "Fetch, score, and enrich candidates for an internal run"
-  default_prompt: "Use $daily-papers-fetch to prepare candidates for a daily paper run."
-policy:
-  allow_implicit_invocation: false

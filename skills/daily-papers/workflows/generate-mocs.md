@@ -1,18 +1,11 @@
----
-name: generate-mocs
-description: |
-  重新生成 Obsidian 里的目录页 / 导航页（MOC）。
-  当用户说“更新索引”“更新论文和概念目录”“刷新论文和概念目录”“刷新MOC”时使用。
----
-
 # 更新目录页
 
 这个 skill 用于手动补刷 Obsidian 里的目录页 / 导航页（MOC）。
 
 ## Step 0: 读取共享配置
 
-将本 `SKILL.md` 所在目录的父目录解析为绝对路径 `SKILLS_ROOT`。读取
-`{SKILLS_ROOT}/_shared/user-config.json` 和可选的 `user-config.local.json`。
+使用公开 Skill 已解析的 `SKILL_ROOT`。读取
+`{SKILL_ROOT}/scripts/shared/user-config.json` 和可选的 `user-config.local.json`。
 
 显式生成并在后续统一使用这些变量：
 
@@ -36,13 +29,13 @@ description: |
 1. 运行概念目录页脚本：
 
 ```bash
-python3 "{SKILLS_ROOT}/_shared/generate_concept_mocs.py"
+python3 "{SKILL_ROOT}/scripts/shared/generate_concept_mocs.py"
 ```
 
 2. 运行论文目录页脚本：
 
 ```bash
-python3 "{SKILLS_ROOT}/_shared/generate_paper_mocs.py"
+python3 "{SKILL_ROOT}/scripts/shared/generate_paper_mocs.py"
 ```
 
 3. 汇报：

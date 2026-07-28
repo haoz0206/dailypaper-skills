@@ -8,8 +8,9 @@ from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SHARED_DIR = REPO_ROOT / "skills" / "_shared"
-MODULE_PATH = REPO_ROOT / "skills" / "paper-reader" / "paper_daemon.py"
+SUITE_ROOT = REPO_ROOT / "skills" / "daily-papers"
+SHARED_DIR = SUITE_ROOT / "scripts" / "shared"
+MODULE_PATH = SUITE_ROOT / "scripts" / "paper-reader" / "paper_daemon.py"
 if str(SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(SHARED_DIR))
 

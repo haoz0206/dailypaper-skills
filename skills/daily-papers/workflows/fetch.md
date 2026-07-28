@@ -1,23 +1,20 @@
----
-name: daily-papers-fetch
-description: |
-  论文抓取（3 步流水线的第 1 步）。抓取 arXiv + HuggingFace 最新论文，打分筛选，富化信息，
-  输出到本次运行 manifest 指定的隔离目录，供后续阶段使用。
-
-  触发词："论文抓取"、"跑一下论文抓取"
-  支持多天模式："过去3天论文推荐"、"过去一周论文推荐"、"过去一周的论文"、"抓 3 天的论文"、"最近5天"
----
-
 > **开始前**: 先说一声 "开始抓取论文 🐕" 并告知今天日期。如果是多天模式，告知抓取范围。
 
 # 论文抓取 (Fetch + Score + Enrich)
 
 你是 用户的论文抓取系统（3 步流水线的第 1 步）。抓取最新论文 → 打分筛选 → 富化信息 → 保存到临时文件。
 
+## 调用边界
+
+本阶段只接受 `daily-papers` 父流程调用。若没有父流程提供的 `RUN_MANIFEST` 和
+`acquired` 协调状态，停止并要求从“今日论文推荐”等公开入口启动；不得把用户的
+普通推荐请求解释为直接运行本阶段。即使是维护者调试，也必须由父 workflow 先
+创建 manifest 并取得任务所有权。
+
 ## Step 0: 读取共享配置
 
-将本 `SKILL.md` 所在目录的父目录解析为绝对路径 `SKILLS_ROOT`。先读取
-`{SKILLS_ROOT}/_shared/user-config.json`；如果同目录的 `user-config.local.json`
+使用公开 Skill 已解析的 `SKILL_ROOT`。先读取
+`{SKILL_ROOT}/scripts/shared/user-config.json`；如果同目录的 `user-config.local.json`
 存在，再用它覆盖默认值。也允许 `DAILYPAPER_CONFIG` 指向外部配置。
 
 显式生成并在后续统一使用这些变量：
@@ -42,32 +39,15 @@ description: |
 - 所有关键词、分类、阈值都以共享配置为准
 - `CANDIDATES_OUTPUT` 和 `ENRICHED_OUTPUT` 必须从 `RUN_MANIFEST.paths` 读取
 
-如果父流程没有提供 `RUN_MANIFEST`，先根据当前宿主设置 `HARNESS_ID`（Claude Code
-使用 `claude-code`，Codex 使用 `codex`），再运行：
-
-```bash
-python3 "{SKILLS_ROOT}/_shared/run_context.py" create \
-  --date YYYY-MM-DD --timezone "{TIMEZONE}"
-```
-
-记住返回的 manifest 绝对路径；禁止复用其他运行的 manifest。
-
-随后必须取得 Vault 任务所有权：
-
-```bash
-python3 "{SKILLS_ROOT}/_shared/vault_coordination.py" acquire \
-  "{RUN_MANIFEST}" --harness "{HARNESS_ID}"
-```
-
-如果父流程已经提供 manifest，则确认 `RUN_MANIFEST.coordination.status` 是
-`acquired`。任何其他状态都停止；内部阶段不得绕过协调器直接写 Vault。
+确认父流程提供的 `RUN_MANIFEST.coordination.status` 是 `acquired`。没有 manifest
+或任何其他状态都停止；内部阶段不得创建 manifest、调用 acquire 或直接写 Vault。
 
 后续统一以共享配置和上面的变量为准。
 
 开始抓取前更新运行状态：
 
 ```bash
-python3 "{SKILLS_ROOT}/_shared/run_context.py" update "{RUN_MANIFEST}" \
+python3 "{SKILL_ROOT}/scripts/shared/run_context.py" update "{RUN_MANIFEST}" \
   --status fetching
 ```
 
@@ -77,14 +57,14 @@ python3 "{SKILLS_ROOT}/_shared/run_context.py" update "{RUN_MANIFEST}" \
 - "过去一周"、"最近7天"、"一周的论文" → `--days 7`
 - "过去3天"、"最近三天"、"抓3天" → `--days 3`
 - "过去两周" → `--days 14`
-- 无特殊指定 / "跑一下论文抓取" → 不加 `--days`（默认当天）
+- 无特殊指定 → 不加 `--days`（默认当天）
 
 将解析出的天数存为变量 `DAYS_ARG`，在后续脚本调用中使用。
 
 ## 配置来源
 
-- 默认配置在 `{SKILLS_ROOT}/_shared/user-config.json`
-- 个人覆盖配置放在 `{SKILLS_ROOT}/_shared/user-config.local.json`
+- 默认配置在 `{SKILL_ROOT}/scripts/shared/user-config.json`
+- 个人覆盖配置放在 `{SKILL_ROOT}/scripts/shared/user-config.local.json`
 - 如果两者都存在，以 `local` 为准
 
 ## 工作流程
@@ -95,11 +75,11 @@ python3 "{SKILLS_ROOT}/_shared/run_context.py" update "{RUN_MANIFEST}" \
 
 ```bash
 # 默认：当天
-python3 "{SKILLS_ROOT}/daily-papers/fetch_and_score.py" \
+python3 "{SKILL_ROOT}/scripts/daily/fetch_and_score.py" \
   --date YYYY-MM-DD --timezone "{TIMEZONE}" --output "{CANDIDATES_OUTPUT}"
 
 # 多天模式（将 N 替换为解析出的天数）
-python3 "{SKILLS_ROOT}/daily-papers/fetch_and_score.py" \
+python3 "{SKILL_ROOT}/scripts/daily/fetch_and_score.py" \
   --date YYYY-MM-DD --timezone "{TIMEZONE}" --days N --output "{CANDIDATES_OUTPUT}"
 ```
 
@@ -123,7 +103,7 @@ python3 "{SKILLS_ROOT}/daily-papers/fetch_and_score.py" \
 子进程并发请求，纯 regex 解析 HTML，不依赖宿主专用网页工具。
 
 ```bash
-python3 "{SKILLS_ROOT}/daily-papers/enrich_papers.py" \
+python3 "{SKILL_ROOT}/scripts/daily/enrich_papers.py" \
   --input "{CANDIDATES_OUTPUT}" --output "{ENRICHED_OUTPUT}"
 ```
 
@@ -155,7 +135,8 @@ python3 "{SKILLS_ROOT}/daily-papers/enrich_papers.py" \
 完成后检查 `ENRICHED_OUTPUT` 存在且包含有效 JSON 数组。告知用户：
 - 抓取了多少篇论文
 - 富化成功多少篇
-- 提示运行下一步：`跑一下论文点评`
+- 把控制权返回父 workflow，由父流程继续执行 review 阶段；不得要求用户另行调用
+  内部阶段
 
 ## 注意事项
 

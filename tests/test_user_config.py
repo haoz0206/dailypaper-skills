@@ -7,7 +7,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-SHARED_DIR = Path(__file__).resolve().parents[1] / "skills" / "_shared"
+SHARED_DIR = (
+    Path(__file__).resolve().parents[1]
+    / "skills"
+    / "daily-papers"
+    / "scripts"
+    / "shared"
+)
 if str(SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(SHARED_DIR))
 

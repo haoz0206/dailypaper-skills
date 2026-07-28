@@ -1,26 +1,28 @@
----
-name: paper-reader
-description: |
-  Use when user asks to "read paper", "analyze paper", "summarize paper",
-  "读论文", "分析文献", "帮我看一下这篇paper", "论文笔记", or provides a PDF file
-  that appears to be an academic paper. Specialized for CV/DL papers.
-
-  Also supports Zotero integration: "读一下这篇论文 ...", "快速看一下这篇论文 ...",
-  "批判性分析这篇论文 ...", "读一下 Zotero 里的 XXX", "批量读一下 Zotero 里 VLA 分类下的论文"
-
-  **重要触发词**: "读一下 XXX"、"读一下这篇"、"帮我读" → 必须调用此 skill
----
-
 > **开始前**: 先跟用户打个招呼 🐕
 
 # 学术论文阅读助手 (Paper Reader)
 
 专注 CV/DL 领域，支持 Zotero 集成和 Obsidian 笔记保存。
 
+## 执行隔离（跨 Harness）
+
+1. 如果当前 Harness 支持 Subagent，且本任务尚未运行在被委派的子任务中，将论文
+   获取、阅读、公式/图片分析和笔记写入委派给**恰好一个** Subagent。
+2. 向 Subagent 传递论文输入、已解析的配置与 Vault 路径、本 Skill 的模板和质量
+   要求，以及 `DAILYPAPER_PARENT_RUN` 状态；等待它完成后再继续，不得对同一篇
+   论文启动多个并行写入者。
+3. Subagent 可以写论文笔记、概念笔记和图片资源，但不得取得或释放 Vault 锁，
+   不得修改 run manifest，也不得执行 Git add、commit 或 push。
+4. Subagent 必须返回最终笔记路径、创建或修改的概念笔记和资源路径，以及公式、
+   图片、表格的验证结果。父任务必须检查这些文件，再执行目录刷新和任何允许的
+   独立调用 Git 发布。
+5. 如果当前 Harness 不支持 Subagent，则在当前上下文内执行完全相同的流程。若
+   Subagent 已经写入部分文件后失败，先检查现有产物再继续，禁止盲目重复生成。
+
 ## Step 0: 读取共享配置
 
-将本 `SKILL.md` 所在目录的父目录解析为绝对路径 `SKILLS_ROOT`。读取
-`{SKILLS_ROOT}/_shared/user-config.json`；如果同目录的
+使用公开 Skill 已解析的 `SKILL_ROOT`。读取
+`{SKILL_ROOT}/scripts/shared/user-config.json`；如果同目录的
 `user-config.local.json` 存在，再用它覆盖默认值。也允许
 `DAILYPAPER_CONFIG` 指向外部配置。
 
@@ -36,6 +38,7 @@ description: |
 - `GIT_COMMIT_ENABLED`
 - `GIT_PUSH_ENABLED`
 - `DAILYPAPER_PARENT_RUN`（由每日流水线调用时为 true）
+- `DELEGATED_WORKER`（当前执行者是由父任务启动的 Subagent 时为 true）
 
 其中：
 
@@ -59,16 +62,18 @@ description: |
 ### 无 PDF 时的获取流程
 
 1. 只有输入明确来自 Zotero 时，才运行
-   `python3 "{SKILLS_ROOT}/paper-reader/assets/zotero_helper.py" info {item_id}`。
+   `python3 "{SKILL_ROOT}/scripts/paper-reader/zotero_helper.py" info {item_id}`。
 2. 按优先级获取：arXiv HTML > arXiv PDF > DOI > 标题检索。
-3. 从用户 URL、Zotero extra 字段或 arXiv API 标题检索确定 arXiv ID。
-4. 优先用可用网络工具或 `curl` 获取 `https://arxiv.org/html/{arxiv_id}`。
-5. 跳过条件：既无 PDF 也无在线来源 / 非论文内容
+3. 从用户提供的 arXiv URL，或显式 Zotero 条目的 extra 字段和标题检索确定
+   arXiv ID。
+4. 对 arXiv 输入，优先用可用网络工具或 `curl` 获取
+   `https://arxiv.org/html/{arxiv_id}`。
+5. 跳过条件：既无 PDF 也无在线来源，或输入不是论文内容。
 
 对 arXiv URL 或本地 PDF 输入，**不得检查或访问 Zotero SQLite**。Zotero 是显式的
 可选集成，不是 paper-reader 的前置条件。
 
-> Zotero 详细操作见 `{SKILLS_ROOT}/paper-reader/references/zotero-guide.md`
+> Zotero 详细操作见 `{SKILL_ROOT}/references/paper-reader/zotero-guide.md`
 
 ## 2. 阅读模式
 
@@ -82,7 +87,7 @@ description: |
 ## 3. 笔记生成
 
 **模板**: 严格遵循
-`{SKILLS_ROOT}/paper-reader/assets/paper-note-template.md`，不可自行简化。
+`{SKILL_ROOT}/assets/paper-note-template.md`，不可自行简化。
 
 ### 核心质量规则
 
@@ -93,7 +98,7 @@ description: |
 5. **图片外链优先**: arXiv HTML / 项目主页 / GitHub，找不到再本地下载
 
 > 公式/图片/表格的详细质量规范见
-> `{SKILLS_ROOT}/paper-reader/references/quality-standards.md`
+> `{SKILL_ROOT}/references/paper-reader/quality-standards.md`
 
 ### 图片获取流程（多源 fallback）
 
@@ -111,16 +116,16 @@ description: |
 5. 笔记中用 `![Figure X](url)` 外链嵌入
 6. 验证：外链可加载 / 本地文件 >10KB
 7. **URL 去重**：写入前检查 URL 中是否有重复的 arxiv_id 路径段（如 `2603.05312v1/2603.05312v1/`），有则删除重复段。详见
-   `{SKILLS_ROOT}/paper-reader/references/image-troubleshooting.md`
+   `{SKILL_ROOT}/references/paper-reader/image-troubleshooting.md`
 
 > ar5iv 编号不一定对应 Figure 编号，排错见
-> `{SKILLS_ROOT}/paper-reader/references/image-troubleshooting.md`
+> `{SKILL_ROOT}/references/paper-reader/image-troubleshooting.md`
 
 ### 图片可靠性保障（生成后自动执行）
 
 笔记保存后，运行图片可达性检查脚本，自动将不可访问的外链图片下载到本地：
 ```bash
-python3 "{SKILLS_ROOT}/daily-papers/download_note_images.py" "{笔记完整路径}"
+python3 "{SKILL_ROOT}/scripts/daily/download_note_images.py" "{笔记完整路径}"
 ```
 - 可达的外链保持不动，不可达的自动下载到 `assets/` 并替换为 Obsidian wikilink
 - 如有本地化操作，frontmatter `image_source` 自动更新为 `mixed`
@@ -165,13 +170,15 @@ Tags 判断：看 Related Work 小标题 + Abstract 关键词。第一个 tag �
 
 ### 保存后自动执行
 
-1. 只有在 `AUTO_REFRESH_INDEXES=true` 时才刷新目录页：
+1. 当 `DAILYPAPER_PARENT_RUN=true` 或 `DELEGATED_WORKER=true` 时，不刷新 MOC，
+   也不执行任何 Git 操作；只把笔记、概念和资源的实际变更路径及自检结果返回
+   给父流程，由父流程统一验证和刷新目录。
+2. 仅在独立调用且 `AUTO_REFRESH_INDEXES=true` 时刷新目录页，并把生成或修改的
+   MOC 路径加入本次变更路径：
    ```bash
-   python3 "{SKILLS_ROOT}/_shared/generate_concept_mocs.py"
-   python3 "{SKILLS_ROOT}/_shared/generate_paper_mocs.py"
+   python3 "{SKILL_ROOT}/scripts/shared/generate_concept_mocs.py"
+   python3 "{SKILL_ROOT}/scripts/shared/generate_paper_mocs.py"
    ```
-2. 当 `DAILYPAPER_PARENT_RUN=true` 时，将变更路径返回给父流程，**不得执行任何
-   git add、commit 或 push**。
 3. 只有独立调用且 `GIT_COMMIT_ENABLED=true` 时才做 git：
    - 先确认 `VAULT_PATH/.git` 存在
    - 开始前要求工作树干净
@@ -193,7 +200,7 @@ Tags 判断：看 Related Work 小标题 + Abstract 关键词。第一个 tag �
 2. **检查**每个链接对应的概念笔记是否存在（`ls` + `find`）
 3. **创建**不存在的概念（不可跳过），自动归类到对应子目录
 
-> 分类规则和模板见 `{SKILLS_ROOT}/paper-reader/references/concept-categories.md`
+> 分类规则和模板见 `{SKILL_ROOT}/references/paper-reader/concept-categories.md`
 
 ### 自检
 
@@ -211,8 +218,12 @@ Tags 判断：看 Related Work 小标题 + Abstract 关键词。第一个 tag �
 
 ## 7. 交互式功能
 
-完成解析后询问：深入解释？对比其他论文？保存到 Obsidian？
-保存后自动创建缺失概念笔记，报告新增概念数量。
+- “完整解析”“批判分析”“知识提取”以及任何明确要求“论文笔记/保存”的请求，
+  默认按本 Skill 保存到 Obsidian，不要完成后再次询问是否保存。
+- “快速摘要”默认只返回 3–5 句摘要；若用户没有要求保存，可在摘要后询问是否
+  继续生成完整笔记并保存。
+- 已保存后只询问是否需要深入解释或与其他论文对比，并报告笔记路径、资源路径和
+  新增概念数量。
 
 ## 8. 批量处理
 
@@ -220,7 +231,7 @@ Tags 判断：看 Related Work 小标题 + Abstract 关键词。第一个 tag �
 
 ## 参考文件（按需查阅）
 
-- **`{SKILLS_ROOT}/paper-reader/references/zotero-guide.md`** — Zotero 查询、分类、PDF 路径获取、智能分类判断
-- **`{SKILLS_ROOT}/paper-reader/references/image-troubleshooting.md`** — ar5iv 图片编号对应、PDF 提取备选
-- **`{SKILLS_ROOT}/paper-reader/references/concept-categories.md`** — 概念自动归类的 16 个子目录规则 + 模板
-- **`{SKILLS_ROOT}/paper-reader/references/quality-standards.md`** — 公式/图片/表格的详细质量规范 + 自检清单
+- **`{SKILL_ROOT}/references/paper-reader/zotero-guide.md`** — Zotero 查询、分类、PDF 路径获取、智能分类判断
+- **`{SKILL_ROOT}/references/paper-reader/image-troubleshooting.md`** — ar5iv 图片编号对应、PDF 提取备选
+- **`{SKILL_ROOT}/references/paper-reader/concept-categories.md`** — 概念自动归类的 16 个子目录规则 + 模板
+- **`{SKILL_ROOT}/references/paper-reader/quality-standards.md`** — 公式/图片/表格的详细质量规范 + 自检清单

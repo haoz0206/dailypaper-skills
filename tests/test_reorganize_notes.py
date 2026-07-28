@@ -8,12 +8,12 @@ from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SHARED_DIR = REPO_ROOT / "skills" / "_shared"
+SUITE_ROOT = REPO_ROOT / "skills" / "daily-papers"
+SHARED_DIR = SUITE_ROOT / "scripts" / "shared"
 MODULE_PATH = (
-    REPO_ROOT
-    / "skills"
+    SUITE_ROOT
+    / "scripts"
     / "paper-reader"
-    / "assets"
     / "reorganize_notes.py"
 )
 if str(SHARED_DIR) not in sys.path:
