@@ -26,16 +26,17 @@ feature branch.
 
    ```bash
    python3 tools/sync_public_skills.py
-   python3 tools/sync_public_skills.py --check
-   python3 -m compileall -q skills
-   python3 -m unittest discover -s tests -v
-   git diff --check
+   python3 -m pip install -r requirements-dev.txt
+   python3 tools/release_gate.py
+   python3 tools/installer_smoke.py
    ```
 
+   This is the same gate entry point used by ordinary CI and tag publication.
+
 5. Validate each public `SKILL.md` with the target harness validator.
-6. Install all four Skills from a clean checkout into Claude Code and Codex,
-   then verify that both installed copies are identical and their CLI entry
-   points load.
+6. Confirm the installer smoke test used the version pinned in `README.md`,
+   installed all four Skills into Claude Code and Codex, produced identical
+   copies, and compiled both installed trees.
 7. Commit the release preparation and merge it into `main`.
 
 ## Publish

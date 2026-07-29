@@ -804,9 +804,9 @@ class VaultCoordinationTests(unittest.TestCase):
                 remote, vault = self._empty_bootstrap_clone(str(index))
                 raised = False
 
-                def interrupt(name: str) -> None:
+                def interrupt(name: str, target: str = failpoint) -> None:
                     nonlocal raised
-                    if name == failpoint and not raised:
+                    if name == target and not raised:
                         raised = True
                         raise RuntimeError(f"simulated crash at {name}")
 

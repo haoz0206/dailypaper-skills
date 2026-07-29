@@ -71,7 +71,7 @@ brew install poppler
 首个正式版本使用固定 tag 安装，避免后续分支变更悄悄改变已经部署的工作流：
 
 ```bash
-npx skills add \
+npx skills@1.5.20 add \
   "https://github.com/haoz0206/dailypaper-skills.git#v1.0.0" \
   --skill configure-dailypaper daily-papers paper-reader generate-mocs \
   --agent claude-code codex \
@@ -85,7 +85,7 @@ npx skills add \
 开发 checkout 可以直接作为安装源：
 
 ```bash
-npx skills add /workspace/dailypaper-skills \
+npx skills@1.5.20 add /workspace/dailypaper-skills \
   --skill configure-dailypaper daily-papers paper-reader generate-mocs \
   --agent claude-code codex \
   --yes
@@ -244,10 +244,8 @@ generate-mocs ─ Standalone Coordinator ─ deterministic MOC builder
 ## 开发与验证
 
 ```bash
-python3 tools/sync_public_skills.py --check
-python3 -m compileall -q skills
-python3 -m unittest discover -s tests -v
-git diff --check
+python3 -m pip install -r requirements-dev.txt
+python3 tools/release_gate.py
 ```
 
 修改公共资源后先同步：
@@ -256,7 +254,15 @@ git diff --check
 python3 tools/sync_public_skills.py
 ```
 
-仓库 CI 在 Python 3.10 和 3.12 上执行相同门禁。维护者发布流程见
+统一门禁会检查生成 Skill 漂移、高信号静态安全规则、Python 编译、完整回归测试
+和补丁格式。仓库 CI 在 Python 3.10 和 3.12 上执行同一入口，tag 发布也会再次
+执行它。若要复现 CI 的第三方安装器冒烟测试（需要 Node.js / `npx`），运行：
+
+```bash
+python3 tools/installer_smoke.py
+```
+
+维护者发布流程见
 [RELEASING.md](RELEASING.md)，版本变化见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 项目来源与归属

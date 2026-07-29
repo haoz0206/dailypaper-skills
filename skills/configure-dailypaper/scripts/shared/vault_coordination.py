@@ -825,7 +825,11 @@ def _validate_bootstrap_commit(
             )
         except SafeGitError as exc:
             raise CoordinationError("git-error", str(exc)) from exc
-        assert blob is not None
+        if blob is None:
+            raise CoordinationError(
+                "bootstrap-commit-conflict",
+                f"Bootstrap candidate is missing {relative}.",
+            )
         if blob != expected_content:
             raise CoordinationError(
                 "bootstrap-commit-conflict",
@@ -1215,7 +1219,6 @@ def _repository_identity(vault: Path) -> tuple[dict, str]:
             "invalid-config",
             f"Repository URL must remain fixed to {FIXED_VAULT_URL}",
         )
-    expected_url = FIXED_VAULT_URL
     remote = str(config.get("remote", FIXED_REMOTE))
     branch = str(config.get("branch", FIXED_BRANCH))
     if remote != FIXED_REMOTE or branch != FIXED_BRANCH:

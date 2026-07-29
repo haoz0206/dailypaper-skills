@@ -22,14 +22,17 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Check generated public Skills
-        run: python3 tools/sync_public_skills.py --check
+      - uses: actions/setup-node@v6
+        if: matrix.python-version == '3.10'
+        with:
+          node-version: "24"
 
-      - name: Compile Python sources
-        run: python3 -m compileall -q skills
+      - name: Install release gate dependencies
+        run: python3 -m pip install --disable-pip-version-check -r requirements-dev.txt
 
-      - name: Run tests
-        run: python3 -m unittest discover -s tests -v
+      - name: Run release gates
+        run: python3 tools/release_gate.py
 
-      - name: Check patch formatting
-        run: git diff --check
+      - name: Smoke test Claude Code and Codex installation
+        if: matrix.python-version == '3.10'
+        run: python3 tools/installer_smoke.py

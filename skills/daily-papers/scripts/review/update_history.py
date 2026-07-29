@@ -73,7 +73,8 @@ def _read_input(path: str | Path, *, limit: int, label: str) -> bytes:
         )
     except SafeIOError as exc:
         raise HistoryError(str(exc)) from exc
-    assert raw is not None
+    if raw is None:
+        raise HistoryError(f"{label} does not exist: {path}")
     return raw
 
 

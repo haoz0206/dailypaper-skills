@@ -12,6 +12,7 @@ class ReleaseMetadataTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
         self.assertIn("dailypaper-skills.git#v1.0.0", readme)
+        self.assertIn("npx skills@1.5.20 add", readme)
         self.assertNotIn("#codex%2Funified-harness", readme)
         self.assertIn("huangkiki/dailypaper-skills", readme)
         self.assertIn("[NOTICE](NOTICE)", readme)
@@ -35,14 +36,51 @@ class ReleaseMetadataTests(unittest.TestCase):
         workflow = (
             ROOT / ".github" / "workflows" / "release.yml"
         ).read_text(encoding="utf-8")
+        ci_workflow = (
+            ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
 
         self.assertIn('tags:\n      - "v*"', workflow)
         self.assertIn("contents: write", workflow)
         self.assertIn("merge-base --is-ancestor", workflow)
-        self.assertIn("tools/sync_public_skills.py --check", workflow)
-        self.assertIn("python3 -m unittest discover -s tests -v", workflow)
+        for source in (workflow, ci_workflow):
+            self.assertIn("-r requirements-dev.txt", source)
+            self.assertIn("python3 tools/release_gate.py", source)
+            self.assertIn("python3 tools/installer_smoke.py", source)
         self.assertIn("gh release create", workflow)
         self.assertIn("--generate-notes", workflow)
+
+    def test_release_gate_contains_static_compile_test_and_drift_checks(self) -> None:
+        gate = (ROOT / "tools" / "release_gate.py").read_text(encoding="utf-8")
+        ruff_config = (ROOT / "ruff.toml").read_text(encoding="utf-8")
+        requirements = (ROOT / "requirements-dev.txt").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("tools/sync_public_skills.py", gate)
+        self.assertIn('"ruff"', gate)
+        self.assertIn('"compileall"', gate)
+        self.assertIn('"unittest"', gate)
+        self.assertIn('("git", "diff", "--check")', gate)
+        for rule in (
+            "B023",
+            "F821",
+            "F841",
+            "PLW1509",
+            "S101",
+            "S314",
+            "S608",
+        ):
+            self.assertIn(f'"{rule}"', ruff_config)
+        self.assertRegex(requirements, r"(?m)^ruff==\d+\.\d+\.\d+$")
+
+        installer = (ROOT / "tools" / "installer_smoke.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('SKILLS_CLI = "skills@1.5.20"', installer)
+        self.assertIn('"claude-code"', installer)
+        self.assertIn('"codex"', installer)
+        self.assertIn('"--copy"', installer)
 
     def test_release_notes_have_a_catch_all_category(self) -> None:
         release_config = (

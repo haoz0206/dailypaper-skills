@@ -190,7 +190,8 @@ def _stream_regular_file(
         required=True,
         label=label,
     )
-    assert descriptor is not None
+    if descriptor is None:
+        raise SafeIOError(f"{label} disappeared while opening: {candidate}")
     digest = hashlib.sha256()
     prefix = bytearray()
     total = 0

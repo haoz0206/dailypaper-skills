@@ -25,6 +25,10 @@ jobs:
         with:
           python-version: "3.10"
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
       - name: Validate semantic tag
         shell: bash
         run: |
@@ -42,17 +46,14 @@ jobs:
             exit 1
           fi
 
-      - name: Check generated public Skills
-        run: python3 tools/sync_public_skills.py --check
+      - name: Install release gate dependencies
+        run: python3 -m pip install --disable-pip-version-check -r requirements-dev.txt
 
-      - name: Compile Python sources
-        run: python3 -m compileall -q skills
+      - name: Run release gates
+        run: python3 tools/release_gate.py
 
-      - name: Run tests
-        run: python3 -m unittest discover -s tests -v
-
-      - name: Check patch formatting
-        run: git diff --check
+      - name: Smoke test Claude Code and Codex installation
+        run: python3 tools/installer_smoke.py
 
       - name: Create GitHub Release
         env:

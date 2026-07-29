@@ -732,9 +732,13 @@ class RunGuardian:
             while not self._stopping:
                 if not self._owner_is_alive() or self._idle_expired():
                     break
-                assert self._server is not None
+                server = self._server
+                if server is None:
+                    raise GuardianUnavailable(
+                        "Guardian server disappeared after lock acquisition"
+                    )
                 try:
-                    client, _ = self._server.accept()
+                    client, _ = server.accept()
                 except socket.timeout:
                     continue
                 with client:

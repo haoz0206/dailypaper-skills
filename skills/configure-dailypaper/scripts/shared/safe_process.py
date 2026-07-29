@@ -11,13 +11,16 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import sys
 import threading
 from dataclasses import dataclass
-from typing import Callable, Mapping, Sequence
+from typing import Mapping, Sequence
 
 
 CHUNK_BYTES = 64 * 1024
 READER_JOIN_SECONDS = 0.5
+CHILD_FILE_LIMIT_FLAG = "--dailypaper-child-file-limit"
+MAX_CHILD_ERROR_BYTES = 2048
 
 
 class SafeProcessError(RuntimeError):
@@ -61,7 +64,7 @@ def _validated_arguments(arguments: Sequence[str]) -> tuple[str, ...]:
     return tuple(arguments)
 
 
-def _file_size_limiter(max_bytes: int | None) -> Callable[[], None] | None:
+def _validated_file_size_limit(max_bytes: int | None) -> int | None:
     if max_bytes is None:
         return None
     _positive_number(max_bytes, "max_file_bytes")
@@ -73,12 +76,69 @@ def _file_size_limiter(max_bytes: int | None) -> Callable[[], None] | None:
         raise SafeProcessError(
             "This platform cannot enforce child output-file limits"
         ) from exc
+    if not hasattr(resource, "RLIMIT_FSIZE") or not hasattr(resource, "RLIMIT_CORE"):
+        raise SafeProcessError(
+            "This platform cannot enforce child output-file limits"
+        )
+    return max_bytes
 
-    def apply_limit() -> None:
+
+def _command_with_file_limit(
+    command: tuple[str, ...],
+    max_bytes: int | None,
+) -> tuple[str, ...]:
+    """Wrap a command in a fresh interpreter that applies RLIMIT_FSIZE.
+
+    ``preexec_fn`` is unsafe when the Harness has other threads.  A short-lived
+    isolated interpreter applies the limits and then ``exec`` replaces it with
+    the requested tool, preserving the process-group and output-pipe contract.
+    """
+    if max_bytes is None:
+        return command
+    return (
+        sys.executable,
+        "-I",
+        os.path.abspath(__file__),
+        CHILD_FILE_LIMIT_FLAG,
+        str(max_bytes),
+        *command,
+    )
+
+
+def _write_child_error(message: str) -> None:
+    payload = message.encode("utf-8", errors="replace")[:MAX_CHILD_ERROR_BYTES]
+    try:
+        os.write(2, payload)
+    except OSError:
+        pass
+
+
+def _exec_file_limited_child(arguments: Sequence[str]) -> int:
+    """Apply the requested file limit and replace this helper with the tool."""
+    if len(arguments) < 2:
+        _write_child_error("Invalid bounded-tool child invocation.\n")
+        return 125
+    try:
+        max_bytes = int(arguments[0])
+        if max_bytes <= 0:
+            raise ValueError
+        import resource
+
         resource.setrlimit(resource.RLIMIT_FSIZE, (max_bytes, max_bytes))
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    except (ImportError, OSError, ValueError):
+        _write_child_error("Could not apply bounded-tool file limits.\n")
+        return 125
 
-    return apply_limit
+    command = tuple(arguments[1:])
+    try:
+        os.execvpe(command[0], command, os.environ)
+    except FileNotFoundError:
+        _write_child_error("Could not start bounded local tool: executable not found.\n")
+        return 127
+    except OSError as exc:
+        _write_child_error(f"Could not start bounded local tool: {exc}\n")
+        return 126
 
 
 def _validated_environment(
@@ -137,21 +197,24 @@ def run_bounded_tool(
         max_stderr_bytes, int
     ):
         raise ValueError("captured stream limits must be integers")
-    limiter = _file_size_limiter(max_file_bytes)
+    file_size_limit = _validated_file_size_limit(max_file_bytes)
+    process_command = _command_with_file_limit(command, file_size_limit)
     child_environment = _validated_environment(environment)
     try:
         process = subprocess.Popen(
-            command,
+            process_command,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
-            preexec_fn=limiter,
             env=child_environment,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise SafeProcessError(f"Could not start local tool: {exc}") from exc
-    assert process.stdout is not None and process.stderr is not None
+    if process.stdout is None or process.stderr is None:
+        _kill_process_group(process)
+        process.wait()
+        raise SafeProcessError("Local tool did not expose bounded output pipes")
 
     outputs = {"stdout": bytearray(), "stderr": bytearray()}
     limits = {
@@ -243,3 +306,9 @@ def run_bounded_tool(
         stdout=bytes(outputs["stdout"]),
         stderr=bytes(outputs["stderr"]),
     )
+
+
+if __name__ == "__main__":
+    if len(sys.argv) >= 2 and sys.argv[1] == CHILD_FILE_LIMIT_FLAG:
+        raise SystemExit(_exec_file_limited_child(sys.argv[2:]))
+    raise SystemExit("safe_process.py is an internal module")

@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -62,6 +63,7 @@ class SafeProcessTests(unittest.TestCase):
             timeout=2,
             max_stdout_bytes=32,
             max_stderr_bytes=32,
+            max_file_bytes=1024,
             environment=environment,
         )
 
@@ -153,6 +155,34 @@ class SafeProcessTests(unittest.TestCase):
 
             self.assertNotEqual(result.returncode, 0)
             self.assertLessEqual(output.stat().st_size, 128)
+
+    def test_file_limit_uses_exec_wrapper_without_preexec_fn(self) -> None:
+        original_popen = safe_process.subprocess.Popen
+        invocations: list[tuple[tuple[str, ...], dict]] = []
+
+        def recording_popen(command, **kwargs):
+            invocations.append((tuple(command), dict(kwargs)))
+            return original_popen(command, **kwargs)
+
+        with patch.object(
+            safe_process.subprocess,
+            "Popen",
+            side_effect=recording_popen,
+        ):
+            result = safe_process.run_bounded_tool(
+                [sys.executable, "-c", "pass"],
+                timeout=2,
+                max_stdout_bytes=16,
+                max_stderr_bytes=16,
+                max_file_bytes=128,
+            )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(len(invocations), 1)
+        command, options = invocations[0]
+        self.assertIn(safe_process.CHILD_FILE_LIMIT_FLAG, command)
+        self.assertTrue(options["start_new_session"])
+        self.assertNotIn("preexec_fn", options)
 
 
 if __name__ == "__main__":

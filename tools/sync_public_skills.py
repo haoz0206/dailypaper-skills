@@ -176,7 +176,8 @@ def _source_bytes(relative: Path) -> bytes:
         )
     except SafeIOError as exc:
         raise SyncError(str(exc)) from exc
-    assert payload is not None
+    if payload is None:
+        raise SyncError(f"Canonical Skill resource does not exist: {relative}")
     return payload
 
 

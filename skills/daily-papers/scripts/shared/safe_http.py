@@ -651,7 +651,10 @@ class SafeHTTPClient:
                         "location",
                         required=True,
                     )
-                    assert location is not None
+                    if location is None:
+                        raise SafeHTTPError(
+                            "Redirect response is missing one Location header"
+                        )
                     if redirect_count >= self.max_redirects:
                         raise SafeHTTPError(
                             "Remote response exceeded the redirect limit"

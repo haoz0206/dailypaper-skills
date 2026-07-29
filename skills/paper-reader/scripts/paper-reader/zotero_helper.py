@@ -35,31 +35,6 @@ def copy_db():
     return sqlite3.connect(f"file:{TEMP_DB}?mode=ro", uri=True)
 
 
-def get_all_child_collections(conn, collection_id: int) -> list[int]:
-    """递归获取所有子分类ID（包含自身）"""
-    cursor = conn.cursor()
-    cursor.execute("SELECT collectionID, parentCollectionID FROM collections")
-    all_collections = cursor.fetchall()
-
-    # 构建父子关系映射
-    children_map = {}
-    for cid, parent_id in all_collections:
-        if parent_id not in children_map:
-            children_map[parent_id] = []
-        children_map[parent_id].append(cid)
-
-    # 递归收集所有子分类
-    result = [collection_id]
-    def collect_children(cid):
-        if cid in children_map:
-            for child_id in children_map[cid]:
-                result.append(child_id)
-                collect_children(child_id)
-
-    collect_children(collection_id)
-    return result
-
-
 def list_collections(conn):
     """列出所有分类"""
     cursor = conn.cursor()
@@ -85,9 +60,14 @@ def list_papers_in_collection(conn, collection_id, recursive=False):
     cursor = conn.cursor()
 
     if recursive:
-        collection_ids = get_all_child_collections(conn, collection_id)
-        placeholders = ','.join('?' * len(collection_ids))
-        query = f"""
+        cursor.execute("""
+            WITH RECURSIVE selected(collectionID) AS (
+                SELECT ?
+                UNION
+                SELECT c.collectionID
+                FROM collections c
+                JOIN selected s ON c.parentCollectionID = s.collectionID
+            )
             SELECT DISTINCT i.itemID, idv.value as title,
                    (SELECT value FROM itemData id2
                     JOIN itemDataValues idv2 ON id2.valueID = idv2.valueID
@@ -98,13 +78,12 @@ def list_papers_in_collection(conn, collection_id, recursive=False):
             JOIN itemData id ON i.itemID = id.itemID
             JOIN itemDataValues idv ON id.valueID = idv.valueID
             JOIN fields f ON id.fieldID = f.fieldID
-            WHERE ci.collectionID IN ({placeholders})
+            WHERE ci.collectionID IN (SELECT collectionID FROM selected)
               AND f.fieldName = 'title'
               AND i.itemTypeID != 14
             ORDER BY date DESC
-        """
-        cursor.execute(query, collection_ids)
-        print(f"(递归查询，包含 {len(collection_ids)} 个分类)")
+        """, (collection_id,))
+        print("(递归查询，包含全部子分类)")
     else:
         cursor.execute("""
             SELECT i.itemID, idv.value as title,

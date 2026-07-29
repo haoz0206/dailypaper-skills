@@ -50,7 +50,8 @@ def validate_note(
             max_bytes=MAX_NOTE_BYTES,
             label="Paper note",
         )
-        assert raw is not None
+        if raw is None:
+            raise NoteValidationError(f"Paper note does not exist: {note_path}")
         text = raw.decode("utf-8")
     except SafeIOError as exc:
         raise NoteValidationError(str(exc)) from exc

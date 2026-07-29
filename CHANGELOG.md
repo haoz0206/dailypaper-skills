@@ -34,6 +34,10 @@ First formal release of the maintained unified-harness derivative.
 - Cross-machine and cross-harness Vault coordination with exact change-set
   publication.
 - Python 3.10/3.12 CI and self-contained installation tests.
+- One shared Release Gate for generated-package drift, high-signal static
+  safety checks, source compilation, regression tests, and patch formatting.
+- A pinned `skills@1.5.20` Claude Code/Codex installation smoke test that
+  verifies exact copied trees before every release.
 
 ### Changed
 
@@ -46,6 +50,8 @@ First formal release of the maintained unified-harness derivative.
 - Made `window_days` an immutable daily Run intent.
 - Centralized paper reading, configuration schema, Git inspection, MOC
   generation, and publication ownership to remove duplicate workflows.
+- Anchored fallback history discovery to the immutable Run target date instead
+  of the server's local wall-clock date.
 
 ### Security
 
@@ -54,6 +60,12 @@ First formal release of the maintained unified-harness derivative.
   user-confirmed Run or Session IDs.
 - Publication rejects unknown dirty paths, changed registered artifacts,
   unexpected remote commits, symlink escapes, and unregistered staged content.
+- Bounded document tools apply child file limits through an isolated
+  exec-wrapper instead of thread-unsafe `preexec_fn`.
+- arXiv Atom parsing rejects DTD/entity declarations before XML parsing, and
+  Zotero recursive collection lookup uses a cycle-safe parameterized CTE.
+- Production safety checks remain active under optimized Python instead of
+  depending on removable `assert` statements.
 - Zotero access is optional, explicit-input-only, and read from a temporary
   read-only SQLite snapshot.
 

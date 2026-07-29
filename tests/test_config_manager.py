@@ -490,8 +490,8 @@ class ConfigManagerTests(unittest.TestCase):
                     encoding="utf-8",
                 )
 
-                def inject(name: str) -> None:
-                    if name == failpoint:
+                def inject(name: str, target: str = failpoint) -> None:
+                    if name == target:
                         raise config_manager.ConfigError(
                             f"simulated crash at {name}"
                         )

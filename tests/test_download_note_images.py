@@ -618,6 +618,13 @@ class DownloadNoteImagesTests(unittest.TestCase):
             self.assertTrue(selected.is_file())
             self.assertTrue(selected.resolve().is_relative_to(work_dir.resolve()))
             self.assertEqual(fetcher.urls, ["https://arxiv.org/pdf/2607.00001.pdf"])
+            self.assertEqual(len(runner_calls), 2)
+            self.assertIn("-list", runner_calls[0])
+            self.assertIn("-png", runner_calls[1])
+            self.assertEqual(
+                sorted(path.name for path in work_dir.iterdir()),
+                ["arxiv-2607.00001.pdf", "pdf-extract-2607.00001-1"],
+            )
 
     def test_pdfimages_output_directory_is_bounded_before_sorting(self) -> None:
         fetcher = FakePDFFetcher()
@@ -657,13 +664,6 @@ class DownloadNoteImagesTests(unittest.TestCase):
                 1,
                 Path(temp_dir),
                 fetcher.new_budget(),
-            )
-            self.assertEqual(len(runner_calls), 2)
-            self.assertIn("-list", runner_calls[0])
-            self.assertIn("-png", runner_calls[1])
-            self.assertEqual(
-                sorted(path.name for path in work_dir.iterdir()),
-                ["arxiv-2607.00001.pdf", "pdf-extract-2607.00001-1"],
             )
 
     def test_pdf_image_plan_blocks_decoded_bomb_before_extraction(

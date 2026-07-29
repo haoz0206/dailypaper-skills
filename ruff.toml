@@ -1,0 +1,15 @@
+target-version = "py310"
+
+[lint]
+select = [
+  "B023",    # loop variables captured by closures
+  "F821",    # undefined names, including dead test assertions
+  "F841",    # unused locals that often reveal incomplete checks
+  "PLW1509", # thread-unsafe subprocess preexec_fn
+  "S101",    # runtime assertions disappear under python -O
+  "S314",    # unsafe parsing of untrusted XML
+  "S608",    # SQL built from untrusted string interpolation
+]
+
+[lint.per-file-ignores]
+"tests/**" = ["S101"]

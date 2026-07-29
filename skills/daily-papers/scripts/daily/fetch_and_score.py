@@ -18,7 +18,7 @@ import json
 import re
 import sys
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from itertools import islice
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -426,8 +426,16 @@ def fetch_arxiv_papers(
     if not xml_text:
         return []
 
+    if re.search(r"<!\s*(?:DOCTYPE|ENTITY)\b", xml_text, flags=re.IGNORECASE):
+        print(
+            "  [WARN] arXiv XML rejected a DTD or entity declaration",
+            file=sys.stderr,
+        )
+        return []
     try:
-        root = ET.fromstring(xml_text)
+        # Atom needs no DTD; declarations were rejected above before this
+        # bounded standard-library parse.
+        root = ET.fromstring(xml_text)  # noqa: S314
     except ET.ParseError as e:
         print(f"  [WARN] arXiv XML parse error: {e}", file=sys.stderr)
         return []
@@ -541,11 +549,11 @@ def load_history() -> list[dict]:
     return load_history_file(HISTORY_PATH)
 
 
-def load_fallback_ids(days: int = 7) -> set[str]:
+def load_fallback_ids(reference_date: date, days: int = 7) -> set[str]:
     ids: set[str] = set()
-    today = datetime.now().date()
     for d in range(1, days + 1):
-        fpath = DAILYPAPERS_DIR / f"{(today - timedelta(days=d)).isoformat()}-论文推荐.md"
+        previous_date = reference_date - timedelta(days=d)
+        fpath = DAILYPAPERS_DIR / f"{previous_date.isoformat()}-论文推荐.md"
         try:
             raw = read_regular_bytes(
                 fpath,
@@ -603,7 +611,7 @@ def merge_and_dedup(
                 history_ids[hid] = hdate
 
     if len(history) < 10:
-        for fid in load_fallback_ids():
+        for fid in load_fallback_ids(target_date):
             history_ids.setdefault(fid, "unknown")
 
     # ── cross-day dedup ──
@@ -655,7 +663,7 @@ def merge_and_dedup(
 # ── Main ───────────────────────────────────────────────────────────────────
 
 
-def resolve_target_date(date_value: str | None, timezone: str):
+def resolve_target_date(date_value: str | None, timezone: str) -> date:
     if date_value:
         return datetime.strptime(date_value, "%Y-%m-%d").date()
     return datetime.now(ZoneInfo(timezone)).date()

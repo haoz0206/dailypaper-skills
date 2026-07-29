@@ -225,7 +225,8 @@ def parse_frontmatter(path: Path) -> dict[str, str]:
         )
     except SafeIOError as exc:
         raise PaperIdentityError(f"Cannot read note frontmatter: {path}") from exc
-    assert raw is not None
+    if raw is None:
+        raise PaperIdentityError(f"Paper note does not exist: {path}")
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:

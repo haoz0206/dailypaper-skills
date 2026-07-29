@@ -182,6 +182,27 @@ class FetchIdentityTests(unittest.TestCase):
         ):
             self.assertEqual(fetch_and_score.fetch_arxiv_papers(days=1), [])
 
+    def test_arxiv_xml_rejects_dtd_before_standard_parser(self) -> None:
+        payload = """\
+<?xml version="1.0"?>
+<!DOCTYPE feed [<!ENTITY repeated "paper">]>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>&repeated;</title>
+</feed>
+"""
+        with (
+            patch.object(fetch_and_score, "fetch_url", return_value=payload),
+            patch.object(fetch_and_score.ET, "fromstring") as parser,
+        ):
+            result = fetch_and_score.fetch_arxiv_papers(
+                date(2026, 7, 29),
+                date(2026, 7, 29),
+                days=1,
+            )
+
+        self.assertEqual(result, [])
+        parser.assert_not_called()
+
     def test_frozen_runtime_context_configures_fetch_without_shared_reread(
         self,
     ) -> None:
@@ -342,6 +363,29 @@ class FetchIdentityTests(unittest.TestCase):
 
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0]["title"], "Second")
+
+    def test_fallback_history_is_anchored_to_the_run_target_date(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            daily_dir = Path(temp_dir)
+            (daily_dir / "2026-07-28-论文推荐.md").write_text(
+                "https://arxiv.org/abs/2607.01234\n",
+                encoding="utf-8",
+            )
+            (daily_dir / "2026-07-27-论文推荐.md").write_text(
+                "https://arxiv.org/abs/2607.05678\n",
+                encoding="utf-8",
+            )
+            with patch.object(
+                fetch_and_score,
+                "DAILYPAPERS_DIR",
+                daily_dir,
+            ):
+                ids = fetch_and_score.load_fallback_ids(
+                    date(2026, 7, 29),
+                    days=2,
+                )
+
+        self.assertEqual(ids, {"2607.01234", "2607.05678"})
 
 
 if __name__ == "__main__":

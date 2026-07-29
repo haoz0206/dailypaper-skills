@@ -331,7 +331,10 @@ class SafeFetcher:
                 )
                 size, digest = downloaded.bytes, downloaded.sha256
             else:
-                assert downloaded.media_type is not None
+                if downloaded.media_type is None:
+                    raise DownloadError(
+                        "PDF response is missing a validated media type"
+                    )
                 _validate_pdf_header(
                     downloaded.read_verified_prefix(8),
                     declared_media_type=downloaded.media_type,
@@ -679,7 +682,10 @@ def _atomic_write_note(path: Path, content: str, *, expected_sha256: str) -> Non
             max_bytes=MAX_NOTE_BYTES,
             label="Paper note",
         )
-        assert current is not None
+        if current is None:
+            raise ConcurrentNoteChangeError(
+                f"Paper note disappeared before update: {path}"
+            )
     except SafeIOError as exc:
         raise ConcurrentNoteChangeError(f"Cannot re-read note before update: {path}") from exc
     if hashlib.sha256(current).hexdigest() != expected_sha256:
@@ -717,7 +723,10 @@ def _atomic_write_note(path: Path, content: str, *, expected_sha256: str) -> Non
                 max_bytes=MAX_NOTE_BYTES,
                 label="Paper note",
             )
-            assert latest is not None
+            if latest is None:
+                raise ConcurrentNoteChangeError(
+                    f"Paper note disappeared before replacement: {path}"
+                )
             if hashlib.sha256(latest).hexdigest() != expected_sha256:
                 raise ConcurrentNoteChangeError(
                     "Paper note changed while images were processed; "
@@ -839,7 +848,8 @@ def process_note(
             max_bytes=MAX_NOTE_BYTES,
             label="Paper note",
         )
-        assert original_bytes is not None
+        if original_bytes is None:
+            raise ImageLocalizationError(f"Paper note does not exist: {note}")
         original_text = original_bytes.decode("utf-8")
     except SafeIOError as exc:
         raise ImageLocalizationError(str(exc)) from exc

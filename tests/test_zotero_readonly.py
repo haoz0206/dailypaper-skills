@@ -1,11 +1,12 @@
 import importlib.util
+import io
 import os
 import sqlite3
 import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import closing
+from contextlib import closing, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -89,6 +90,57 @@ class ZoteroReadonlyTests(unittest.TestCase):
             "move",
         ):
             self.assertNotIn(command, result.stdout)
+
+    def test_recursive_collection_query_is_parameterized_and_cycle_safe(
+        self,
+    ) -> None:
+        module = load_zotero_helper()
+        self.addCleanup(module._TEMP_DIR.cleanup)
+        with closing(sqlite3.connect(":memory:")) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE collections (
+                    collectionID INTEGER PRIMARY KEY,
+                    parentCollectionID INTEGER
+                );
+                CREATE TABLE collectionItems (
+                    collectionID INTEGER,
+                    itemID INTEGER
+                );
+                CREATE TABLE items (
+                    itemID INTEGER PRIMARY KEY,
+                    itemTypeID INTEGER
+                );
+                CREATE TABLE itemData (
+                    itemID INTEGER,
+                    valueID INTEGER,
+                    fieldID INTEGER
+                );
+                CREATE TABLE itemDataValues (
+                    valueID INTEGER PRIMARY KEY,
+                    value TEXT
+                );
+                CREATE TABLE fields (
+                    fieldID INTEGER PRIMARY KEY,
+                    fieldName TEXT
+                );
+                INSERT INTO collections VALUES (1, 2), (2, 1);
+                INSERT INTO collectionItems VALUES (2, 10);
+                INSERT INTO items VALUES (10, 1);
+                INSERT INTO fields VALUES (1, 'title');
+                INSERT INTO itemDataValues VALUES (1, 'Cycle-safe paper');
+                INSERT INTO itemData VALUES (10, 1, 1);
+                """
+            )
+            output = io.StringIO()
+            with redirect_stdout(output):
+                module.list_papers_in_collection(
+                    connection,
+                    1,
+                    recursive=True,
+                )
+
+        self.assertIn("Cycle-safe paper", output.getvalue())
 
     def test_public_packages_exclude_nested_harness_and_database_writers(
         self,

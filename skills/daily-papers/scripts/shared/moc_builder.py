@@ -216,7 +216,10 @@ def _verify_moc_write(write: MOCWrite) -> None:
                 f"MOC target appeared after planning: {write.relative_path}"
             )
         return
-    assert current is not None
+    if current is None:
+        raise MOCConflictError(
+            f"MOC target disappeared after planning: {write.relative_path}"
+        )
     if _content_sha256(current) != write.expected_sha256:
         raise MOCConflictError(
             f"MOC target changed after planning: {write.relative_path}"
