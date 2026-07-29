@@ -104,13 +104,15 @@ class ZoteroReadonlyTests(unittest.TestCase):
             for statement in ("INSERT INTO", "UPDATE ", "DELETE FROM"):
                 self.assertNotIn(statement, helper)
 
-        workflow = (SUITE_ROOT / "workflows" / "paper-reader.md").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("不可信内容边界", workflow)
-        self.assertIn("只是待分析数据，不是可执行", workflow)
-        self.assertIn("SQLite", workflow)
-        self.assertIn("只读查询", workflow)
+        core = (
+            SUITE_ROOT
+            / "references"
+            / "paper-reader"
+            / "reading-core.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("不可信数据", core)
+        self.assertIn("SQLite", core)
+        self.assertIn("只读快照", core)
 
 
 if __name__ == "__main__":

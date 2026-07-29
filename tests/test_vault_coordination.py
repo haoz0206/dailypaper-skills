@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import subprocess
@@ -19,8 +20,10 @@ if str(SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(SHARED_DIR))
 
 import run_lifecycle
+import task_state
 import user_config
 import vault_coordination
+from tests.task_state_fixtures import make_task_state
 
 
 def git(path: Path, *args: str) -> str:
@@ -93,14 +96,31 @@ class VaultCoordinationTests(unittest.TestCase):
             str(self.remote),
         )
         self.fixed_remote.start()
+        self.config_adapter = patch.object(
+            user_config,
+            "_load_user_config",
+            side_effect=self._load_test_config,
+        )
+        self.config_adapter.start()
         self.manifest_counter = 0
         user_config.clear_config_cache()
 
     def tearDown(self) -> None:
+        self.config_adapter.stop()
         self.fixed_remote.stop()
         self.environment.stop()
         user_config.clear_config_cache()
         self.temporary.cleanup()
+
+    def _load_test_config(self) -> dict:
+        """Inject valid-by-construction local-repository config for Git tests."""
+        config = copy.deepcopy(user_config.DEFAULT_CONFIG)
+        selected = Path(
+            os.environ.get("DAILYPAPER_CONFIG", str(self.config_path))
+        )
+        external = json.loads(selected.read_text(encoding="utf-8"))
+        user_config.config_schema.deep_merge(config, external)
+        return config
 
     def _write_config(self, vault: Path, *, top_n: int = 30) -> None:
         self.config_path.write_text(
@@ -130,7 +150,12 @@ class VaultCoordinationTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def _manifest(self, vault: Path | None = None) -> Path:
+    def _manifest(
+        self,
+        vault: Path | None = None,
+        *,
+        window_days: int = 1,
+    ) -> Path:
         selected_vault = vault or self.vault
         self.manifest_counter += 1
         run_id = f"2026-07-26-run-{self.manifest_counter}"
@@ -154,6 +179,7 @@ class VaultCoordinationTests(unittest.TestCase):
                 manifest,
                 run_id=run_id,
                 target_date="2026-07-26",
+                window_days=window_days,
                 timezone="Asia/Shanghai",
                 vault=selected_vault,
                 contract=run_lifecycle.DAILY_WORKFLOW_CONTRACT,
@@ -178,6 +204,19 @@ class VaultCoordinationTests(unittest.TestCase):
             ),
         )
         return manifest, lifecycle
+
+    def _runtime_context(self, manifest: Path) -> dict:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        return {
+            "paths": {
+                "vault": str(self.vault),
+                "daily_papers": str(self.vault / "DailyPapers"),
+            },
+            "repository": copy.deepcopy(
+                user_config.load_user_config()["repository"]
+            ),
+            "configuration_fingerprint": data["configuration_fingerprint"],
+        }
 
     def _prepare_v2_publication(
         self,
@@ -245,6 +284,32 @@ class VaultCoordinationTests(unittest.TestCase):
         )
         lifecycle.advance("publishing")
 
+    def test_manifest_entrypoints_do_not_follow_final_symlink(self) -> None:
+        target = self.root / "target-manifest.json"
+        target.write_text("{}", encoding="utf-8")
+        expected = target.read_bytes()
+        link = self.root / "manifest.json"
+        link.symlink_to(target)
+        operations = {
+            "acquire": lambda: vault_coordination.acquire(
+                link,
+                harness="codex",
+            ),
+            "complete": lambda: vault_coordination.complete(link),
+            "fail": lambda: vault_coordination.fail(
+                link,
+                message="test",
+            ),
+        }
+
+        for name, operation in operations.items():
+            with self.subTest(operation=name):
+                with self.assertRaises(vault_coordination.CoordinationError) as caught:
+                    operation()
+                self.assertEqual(caught.exception.status, "invalid-manifest")
+
+        self.assertEqual(target.read_bytes(), expected)
+
     def test_acquire_pushes_machine_readable_task_state(self) -> None:
         manifest = self._manifest()
         result = vault_coordination.acquire(
@@ -257,10 +322,14 @@ class VaultCoordinationTests(unittest.TestCase):
         state_path = (
             self.vault / ".dailypaper" / "tasks" / "daily-papers.json"
         )
-        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state = task_state.parse_task_state(
+            state_path.read_bytes(),
+            source=str(state_path),
+        )
         self.assertEqual(state["run_id"], result["run_id"])
         self.assertEqual(state["status"], "running")
         self.assertEqual(state["harness"], "codex")
+        self.assertEqual(state["window_days"], 1)
         self.assertEqual(git(self.vault, "rev-parse", "HEAD"), result["lock_commit"])
 
         manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
@@ -268,6 +337,120 @@ class VaultCoordinationTests(unittest.TestCase):
             manifest_data["publication"]["acquisition_commit"],
             result["lock_commit"],
         )
+
+    def test_acquire_rejects_same_day_different_window_intent(self) -> None:
+        first = self._manifest(window_days=1)
+        vault_coordination.acquire(
+            first,
+            harness="codex",
+            owner="first-host",
+        )
+        second = self._manifest(window_days=7)
+
+        with self.assertRaises(vault_coordination.CoordinationError) as caught:
+            vault_coordination.acquire(
+                second,
+                harness="claude-code",
+                owner="second-host",
+            )
+
+        self.assertEqual(caught.exception.status, "intent-conflict")
+
+    def test_coordinator_acquire_recovers_crash_after_remote_lock_push(
+        self,
+    ) -> None:
+        manifest, lifecycle = self._v2_manifest()
+        context = self._runtime_context(manifest)
+        inspected = vault_coordination.inspect_task_state(self.vault)
+        original_git = vault_coordination._git
+        interrupted = False
+
+        def interrupt_first_pull(
+            vault: Path,
+            *args: str,
+            check: bool = True,
+        ):
+            nonlocal interrupted
+            if vault == self.vault and args and args[0] == "pull" and not interrupted:
+                interrupted = True
+                raise vault_coordination.CoordinationError(
+                    "simulated-crash",
+                    "crash after remote lock push",
+                )
+            return original_git(vault, *args, check=check)
+
+        with patch.object(
+            vault_coordination,
+            "_git",
+            side_effect=interrupt_first_pull,
+        ):
+            with self.assertRaises(vault_coordination.CoordinationError):
+                vault_coordination.acquire(
+                    manifest,
+                    harness="codex",
+                    owner="test-host",
+                    expected_remote_head=inspected["remote_head"],
+                    runtime_context=context,
+                    record_manifest=False,
+                )
+
+        self.assertEqual(lifecycle.snapshot().phase, "prepared")
+        self.assertIsNone(
+            lifecycle.snapshot().as_dict()["publication"]["acquisition_commit"]
+        )
+        remote_locked = vault_coordination.inspect_task_state(self.vault)
+        self.assertEqual(
+            remote_locked["task_state"]["run_id"],
+            manifest.parent.name,
+        )
+
+        recovered = vault_coordination.acquire(
+            manifest,
+            harness="codex",
+            owner="test-host",
+            expected_remote_head=remote_locked["remote_head"],
+            runtime_context=context,
+            record_manifest=False,
+        )
+        lifecycle.record_acquisition(
+            acquisition_commit=recovered["lock_commit"],
+            remote=recovered["remote"],
+            branch=recovered["branch"],
+        )
+        lifecycle.advance("fetching")
+
+        self.assertTrue(recovered["resumed"])
+        self.assertEqual(lifecycle.snapshot().phase, "fetching")
+        self.assertEqual(
+            git(self.vault, "rev-parse", "HEAD"),
+            remote_locked["remote_head"],
+        )
+
+    def test_remote_state_reader_rejects_unsafe_run_id(self) -> None:
+        state_path = (
+            self.vault / ".dailypaper" / "tasks" / "daily-papers.json"
+        )
+        state_path.parent.mkdir(parents=True)
+        malformed = make_task_state(run_id="../../outside")
+        state_path.write_text(json.dumps(malformed), encoding="utf-8")
+        git(self.vault, "add", ".dailypaper/tasks/daily-papers.json")
+        git(
+            self.vault,
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "malformed remote task state",
+        )
+        git(self.vault, "push", "origin", "main")
+
+        with self.assertRaises(vault_coordination.CoordinationError) as caught:
+            vault_coordination.inspect_task_state(self.vault)
+
+        self.assertEqual(caught.exception.status, "invalid-state")
+        self.assertIn("run_id", str(caught.exception))
 
     def test_active_remote_run_blocks_another_clone(self) -> None:
         first_manifest = self._manifest()
@@ -348,7 +531,6 @@ class VaultCoordinationTests(unittest.TestCase):
                 "DailyPapers/.history.json",
             ],
         )
-
         reader = self.root / "reader"
         subprocess.run(
             ["git", "clone", str(self.remote), str(reader)],
@@ -358,6 +540,84 @@ class VaultCoordinationTests(unittest.TestCase):
         )
         self.assertTrue(
             (reader / "DailyPapers" / "2026-07-26-论文推荐.md").exists()
+        )
+
+    def test_complete_revalidates_artifacts_before_publication(self) -> None:
+        manifest, _lifecycle, daily_output = self._prepare_v2_publication()
+        remote_before = git(self.remote, "rev-parse", "refs/heads/main")
+        daily_output.write_text("# changed after checkpoint\n", encoding="utf-8")
+
+        with self.assertRaises(run_lifecycle.ArtifactConflict):
+            vault_coordination.complete(manifest)
+
+        self.assertEqual(
+            git(self.remote, "rev-parse", "refs/heads/main"),
+            remote_before,
+        )
+
+    def test_complete_rejects_late_unregistered_change_set_file(self) -> None:
+        manifest, lifecycle, _daily_output = self._prepare_v2_publication()
+        late = self.vault / "DailyPapers" / "late.md"
+        lifecycle.checkpoint(
+            changed_paths=[late],
+            enforce_contract=False,
+        )
+        late.write_text("late", encoding="utf-8")
+        remote_before = git(self.remote, "rev-parse", "refs/heads/main")
+
+        with self.assertRaises(run_lifecycle.CheckpointRequired):
+            vault_coordination.complete(manifest)
+
+        self.assertEqual(
+            git(self.remote, "rev-parse", "refs/heads/main"),
+            remote_before,
+        )
+
+    def test_complete_preserves_unregistered_staged_artifact_version(self) -> None:
+        manifest, _lifecycle, daily_output = self._prepare_v2_publication()
+        registered = daily_output.read_bytes()
+        daily_output.write_text("# user staged version\n", encoding="utf-8")
+        git(
+            self.vault,
+            "add",
+            "--",
+            "DailyPapers/2026-07-26-论文推荐.md",
+        )
+        staged = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.vault),
+                "show",
+                ":DailyPapers/2026-07-26-论文推荐.md",
+            ],
+            check=True,
+            capture_output=True,
+        ).stdout
+        daily_output.write_bytes(registered)
+        remote_before = git(self.remote, "rev-parse", "refs/heads/main")
+
+        with self.assertRaises(vault_coordination.CoordinationError) as caught:
+            vault_coordination.complete(manifest)
+
+        self.assertEqual(caught.exception.status, "index-conflict")
+        self.assertEqual(
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(self.vault),
+                    "show",
+                    ":DailyPapers/2026-07-26-论文推荐.md",
+                ],
+                check=True,
+                capture_output=True,
+            ).stdout,
+            staged,
+        )
+        self.assertEqual(
+            git(self.remote, "rev-parse", "refs/heads/main"),
+            remote_before,
         )
 
     def test_completed_date_is_idempotent(self) -> None:
@@ -468,27 +728,31 @@ class VaultCoordinationTests(unittest.TestCase):
 
         self.assertEqual(caught.exception.status, "invalid-config")
 
-    def test_bootstrap_initializes_an_empty_remote(self) -> None:
-        empty_remote = self.root / "empty.git"
-        empty_vault = self.root / "empty-vault"
+    def _empty_bootstrap_clone(self, suffix: str) -> tuple[Path, Path]:
+        remote = self.root / f"empty-{suffix}.git"
+        vault = self.root / f"empty-{suffix}-vault"
         subprocess.run(
             [
                 "git",
                 "init",
                 "--bare",
                 "--initial-branch=main",
-                str(empty_remote),
+                str(remote),
             ],
             check=True,
             capture_output=True,
             text=True,
         )
         subprocess.run(
-            ["git", "clone", str(empty_remote), str(empty_vault)],
+            ["git", "clone", str(remote), str(vault)],
             check=True,
             capture_output=True,
             text=True,
         )
+        return remote, vault
+
+    def test_bootstrap_initializes_an_empty_remote(self) -> None:
+        empty_remote, empty_vault = self._empty_bootstrap_clone("normal")
 
         with patch.object(
             vault_coordination,
@@ -523,6 +787,230 @@ class VaultCoordinationTests(unittest.TestCase):
         run_state.parent.mkdir(parents=True)
         run_state.write_text("{}\n", encoding="utf-8")
         self.assertEqual(git(empty_vault, "status", "--porcelain"), "")
+
+    def test_bootstrap_resumes_every_durable_failure_window(self) -> None:
+        failpoints = (
+            "after-journal",
+            "after-config-replace",
+            "after-gitignore-replace",
+            "after-stage",
+            "after-commit",
+            "after-push-call-before-verify",
+            "after-remote-verify",
+            "after-journal-delete",
+        )
+        for index, failpoint in enumerate(failpoints):
+            with self.subTest(failpoint=failpoint):
+                remote, vault = self._empty_bootstrap_clone(str(index))
+                raised = False
+
+                def interrupt(name: str) -> None:
+                    nonlocal raised
+                    if name == failpoint and not raised:
+                        raised = True
+                        raise RuntimeError(f"simulated crash at {name}")
+
+                with patch.object(
+                    vault_coordination,
+                    "FIXED_VAULT_URL",
+                    str(remote),
+                ):
+                    with patch.object(
+                        vault_coordination,
+                        "_bootstrap_failpoint",
+                        side_effect=interrupt,
+                    ):
+                        with self.assertRaisesRegex(
+                            RuntimeError,
+                            "simulated crash",
+                        ):
+                            vault_coordination.bootstrap_vault(vault)
+                    recovered = vault_coordination.bootstrap_vault(vault)
+
+                self.assertIn(
+                    recovered["status"],
+                    {"bootstrapped", "already-bootstrapped"},
+                )
+                local_head = git(vault, "rev-parse", "HEAD")
+                remote_head = git(
+                    remote,
+                    "rev-parse",
+                    "refs/heads/main",
+                )
+                self.assertEqual(local_head, remote_head)
+                self.assertEqual(git(vault, "status", "--porcelain"), "")
+                self.assertEqual(
+                    git(remote, "rev-list", "--count", "refs/heads/main"),
+                    "1",
+                )
+                git_state = Path(
+                    git(vault, "rev-parse", "--git-path", "dailypaper")
+                )
+                if not git_state.is_absolute():
+                    git_state = vault / git_state
+                self.assertFalse((git_state / "bootstrap-v1.json").exists())
+
+    def test_bootstrap_preserves_user_change_after_interruption(self) -> None:
+        remote, vault = self._empty_bootstrap_clone("managed-conflict")
+
+        def interrupt(name: str) -> None:
+            if name == "after-config-replace":
+                raise RuntimeError("simulated crash")
+
+        with patch.object(
+            vault_coordination,
+            "FIXED_VAULT_URL",
+            str(remote),
+        ):
+            with patch.object(
+                vault_coordination,
+                "_bootstrap_failpoint",
+                side_effect=interrupt,
+            ):
+                with self.assertRaises(RuntimeError):
+                    vault_coordination.bootstrap_vault(vault)
+
+            config_path = vault / ".dailypaper" / "config.json"
+            user_content = b'{"user": "edited while interrupted"}\n'
+            config_path.write_bytes(user_content)
+            with self.assertRaises(
+                vault_coordination.CoordinationError,
+            ) as caught:
+                vault_coordination.bootstrap_vault(vault)
+
+        self.assertEqual(caught.exception.status, "bootstrap-path-conflict")
+        self.assertEqual(config_path.read_bytes(), user_content)
+
+    def test_bootstrap_preserves_unrelated_dirty_file_on_resume(self) -> None:
+        remote, vault = self._empty_bootstrap_clone("unrelated-conflict")
+
+        def interrupt(name: str) -> None:
+            if name == "after-journal":
+                raise RuntimeError("simulated crash")
+
+        with patch.object(
+            vault_coordination,
+            "FIXED_VAULT_URL",
+            str(remote),
+        ):
+            with patch.object(
+                vault_coordination,
+                "_bootstrap_failpoint",
+                side_effect=interrupt,
+            ):
+                with self.assertRaises(RuntimeError):
+                    vault_coordination.bootstrap_vault(vault)
+
+            unrelated = vault / "user-note.md"
+            unrelated.write_text("keep me\n", encoding="utf-8")
+            with self.assertRaises(
+                vault_coordination.CoordinationError,
+            ) as caught:
+                vault_coordination.bootstrap_vault(vault)
+
+        self.assertEqual(caught.exception.status, "unexpected-changes")
+        self.assertEqual(unrelated.read_text(encoding="utf-8"), "keep me\n")
+
+    def test_concurrent_empty_bootstraps_converge_on_one_commit(self) -> None:
+        remote, first = self._empty_bootstrap_clone("concurrent")
+        second = self.root / "empty-concurrent-second-vault"
+        subprocess.run(
+            ["git", "clone", str(remote), str(second)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        def interrupt_after_commit(name: str) -> None:
+            if name == "after-commit":
+                raise RuntimeError("simulated concurrent pause")
+
+        with patch.object(
+            vault_coordination,
+            "FIXED_VAULT_URL",
+            str(remote),
+        ):
+            for vault in (first, second):
+                with patch.object(
+                    vault_coordination,
+                    "_bootstrap_failpoint",
+                    side_effect=interrupt_after_commit,
+                ):
+                    with self.assertRaises(RuntimeError):
+                        vault_coordination.bootstrap_vault(vault)
+
+            first_candidate = git(first, "rev-parse", "HEAD")
+            second_candidate = git(second, "rev-parse", "HEAD")
+            self.assertEqual(first_candidate, second_candidate)
+            first_result = vault_coordination.bootstrap_vault(first)
+            second_result = vault_coordination.bootstrap_vault(second)
+
+        self.assertEqual(first_result["bootstrap_commit"], first_candidate)
+        self.assertEqual(second_result["bootstrap_commit"], first_candidate)
+        self.assertEqual(
+            git(remote, "rev-list", "--count", "refs/heads/main"),
+            "1",
+        )
+
+    def test_bootstrap_rejects_symlinked_vault_metadata_directory(self) -> None:
+        remote, vault = self._empty_bootstrap_clone("symlink-parent")
+        outside = self.root / "outside-bootstrap"
+        outside.mkdir()
+        (vault / ".dailypaper").symlink_to(outside, target_is_directory=True)
+
+        with patch.object(
+            vault_coordination,
+            "FIXED_VAULT_URL",
+            str(remote),
+        ):
+            with self.assertRaises(
+                vault_coordination.CoordinationError,
+            ) as caught:
+                vault_coordination.bootstrap_vault(vault)
+
+        self.assertEqual(caught.exception.status, "bootstrap-path-conflict")
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_corrupt_bootstrap_journal_blocks_without_touching_vault(self) -> None:
+        remote, vault = self._empty_bootstrap_clone("corrupt-journal")
+        git_state = Path(
+            git(vault, "rev-parse", "--git-path", "dailypaper")
+        )
+        if not git_state.is_absolute():
+            git_state = vault / git_state
+        git_state.mkdir(parents=True)
+        journal = git_state / "bootstrap-v1.json"
+        journal.write_text(
+            '{"version": 1, "version": 1, "base_head": null, "before": {}}\n',
+            encoding="utf-8",
+        )
+
+        with patch.object(
+            vault_coordination,
+            "FIXED_VAULT_URL",
+            str(remote),
+        ):
+            with self.assertRaises(
+                vault_coordination.CoordinationError,
+            ) as caught:
+                vault_coordination.bootstrap_vault(vault)
+
+        self.assertEqual(caught.exception.status, "invalid-bootstrap-journal")
+        self.assertFalse((vault / ".gitignore").exists())
+        self.assertFalse((vault / ".dailypaper").exists())
+
+    def test_inspect_task_state_accepts_an_empty_remote(self) -> None:
+        remote, vault = self._empty_bootstrap_clone("inspect")
+        with patch.object(
+            vault_coordination,
+            "FIXED_VAULT_URL",
+            str(remote),
+        ):
+            inspected = vault_coordination.inspect_task_state(vault)
+
+        self.assertEqual(inspected["status"], "inspected")
+        self.assertIsNone(inspected["remote_head"])
+        self.assertIsNone(inspected["task_state"])
 
     def test_acquire_rejects_manifest_created_before_remote_config_pull(
         self,
@@ -604,7 +1092,12 @@ class VaultCoordinationTests(unittest.TestCase):
                     owner="test-host",
                 )
 
-        self.assertEqual(user_config.daily_papers_config()["top_n"], 29)
+        self.assertEqual(
+            json.loads(vault_config.read_text(encoding="utf-8"))[
+                "daily_papers"
+            ]["top_n"],
+            29,
+        )
         self.assertEqual(caught.exception.status, "config-conflict")
 
     def test_v2_acquire_records_immutable_publication_metadata(self) -> None:

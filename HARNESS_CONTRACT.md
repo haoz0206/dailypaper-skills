@@ -192,9 +192,9 @@ is:
 .dailypaper/tasks/daily-papers.json
 ```
 
-It records schema version, task, target date, status, globally unique run ID,
-harness, owner, timestamps, lease, starting commit, stable configuration
-fingerprint, and expected daily output.
+It records schema version, task, target date, the frozen 1–31 day acquisition
+window, status, globally unique run ID, harness, owner, timestamps, lease,
+starting commit, stable configuration fingerprint, and expected daily output.
 
 Every full daily run must:
 
@@ -209,7 +209,9 @@ Every full daily run must:
    repository, the current branch is `main`, and the worktree is clean.
 4. Run `git pull --ff-only origin main`, then discard any cached configuration
    and reload the post-pull Vault configuration.
-5. Stop successfully if the target day's recommendation already exists.
+5. Stop successfully if the target day's recommendation already exists for the
+   same frozen acquisition window. A different window is an explicit intent
+   conflict; it is never silently reused, resumed, overwritten, or cancelled.
 6. Stop without writing if another `running` task owns the document. If its
    local run directory is absent, report the exact `run_id` and require explicit
    user confirmation before offering cancellation; never infer abandonment from
@@ -279,6 +281,14 @@ write the Manifest. The Run Coordinator is the only supported writer and uses
 RunLifecycle's per-mutation manifest lock, revision compare-and-set, and atomic
 snapshot with a previous-revision backup. Subagents only return artifact
 candidates and progress reports.
+
+Coordinated guardians have no production idle expiry. A responsive guardian is
+never treated as abandoned based on elapsed time. To recover after the original
+local Harness has actually stopped while its detached guardian remains alive,
+the AI must show the exact `run_id` and ask the user. Only
+`start --confirm-running-run-id <run-id>` may stop that guardian and resume the
+same Manifest after the normal ownership, intent, configuration, artifact, and
+dirty-path checks. It does not cancel remote ownership or delete artifacts.
 
 Cross-machine recovery is cancellation followed by a new Run, never resume.
 The AI must explain the still-running remote Run and ask the user whether to

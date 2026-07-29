@@ -1,5 +1,6 @@
 import json
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -50,6 +51,7 @@ class MachineConfigTests(unittest.TestCase):
                 loaded["zotero"]["database_path"],
                 str(zotero_db.resolve()),
             )
+            self.assertEqual(stat.S_IMODE(config_path.stat().st_mode), 0o600)
 
     def test_user_config_uses_machine_vault_and_auto_loads_shared_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -138,6 +140,101 @@ class MachineConfigTests(unittest.TestCase):
                     "token": "secret",
                 }
             )
+
+    def test_rejects_boolean_version_and_duplicate_json_keys(self) -> None:
+        with self.assertRaises(machine_config.MachineConfigError):
+            machine_config.normalize_machine_config(
+                {"version": True, "vault_path": "/tmp/vault"}
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "machine.json"
+            path.write_text(
+                '{"version":1,"vault_path":"/tmp/a","vault_path":"/tmp/b"}',
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                {"DAILYPAPER_MACHINE_CONFIG": str(path)},
+                clear=False,
+            ):
+                with self.assertRaisesRegex(
+                    machine_config.MachineConfigError,
+                    "duplicate JSON key",
+                ):
+                    machine_config.load_machine_config(required=True)
+
+    def test_rejects_non_file_oversized_and_too_deep_machine_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "machine.json"
+            with patch.dict(
+                os.environ,
+                {"DAILYPAPER_MACHINE_CONFIG": str(config_path)},
+                clear=False,
+            ):
+                config_path.mkdir()
+                with self.assertRaisesRegex(
+                    machine_config.MachineConfigError,
+                    "regular file",
+                ):
+                    machine_config.load_machine_config(required=True)
+                config_path.rmdir()
+
+                config_path.write_bytes(
+                    b" " * (machine_config.MAX_MACHINE_CONFIG_BYTES + 1)
+                )
+                with self.assertRaisesRegex(
+                    machine_config.MachineConfigError,
+                    "safety limit",
+                ):
+                    machine_config.load_machine_config(required=True)
+
+                config_path.write_text("[" * 2000 + "]" * 2000, encoding="utf-8")
+                with self.assertRaisesRegex(
+                    machine_config.MachineConfigError,
+                    "bounded UTF-8 JSON|JSON object",
+                ):
+                    machine_config.load_machine_config(required=True)
+
+    def test_rejects_symlink_and_relative_machine_config_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            target = root / "target.json"
+            target.write_text(
+                '{"version":1,"vault_path":"/tmp/vault"}',
+                encoding="utf-8",
+            )
+            link = root / "machine.json"
+            link.symlink_to(target)
+            with patch.dict(
+                os.environ,
+                {"DAILYPAPER_MACHINE_CONFIG": str(link)},
+                clear=False,
+            ):
+                with self.assertRaisesRegex(
+                    machine_config.MachineConfigError,
+                    "symbolic link",
+                ):
+                    machine_config.load_machine_config(required=True)
+                with self.assertRaisesRegex(
+                    machine_config.MachineConfigError,
+                    "symbolic link",
+                ):
+                    machine_config.write_machine_config(
+                        {"version": 1, "vault_path": "/tmp/vault"}
+                    )
+
+        with patch.dict(
+            os.environ,
+            {"DAILYPAPER_MACHINE_CONFIG": "relative.json"},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(
+                machine_config.MachineConfigError,
+                "absolute path",
+            ):
+                machine_config.machine_config_path()
 
     def test_explicit_set_can_repair_a_malformed_machine_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

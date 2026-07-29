@@ -11,10 +11,12 @@
 立即停止，并引导用户使用公开的每日推荐入口。不得修改 Manifest、取得 Vault
 所有权、写 Vault Task State、提交或推送。
 
-## Step 0: 读取共享配置
+## Step 0: 使用父流程的运行时上下文
 
-使用公开 Skill 已解析的 `SKILL_ROOT`。读取
-`{SKILL_ROOT}/scripts/shared/user-config.json` 和可选的 `user-config.local.json`。
+父流程必须传入同一个只读 `RUNTIME_CONTEXT`，且其 `status=ready`、
+`paths.vault` 与 Manifest 中的 Vault 完全一致、
+`configuration_fingerprint` 与 Manifest 完全一致。缺失或不一致时停止；本阶段
+不得重新运行预检、读取配置文件或自行合并覆盖层。
 
 显式生成并在后续统一使用这些变量：
 
@@ -29,15 +31,16 @@
 - `RUN_MANIFEST`
 - `ENRICHED_INPUT = RUN_MANIFEST.paths.enriched`
 
-其中：
+所有值只从 `RUNTIME_CONTEXT` 或 `RUN_MANIFEST.paths` 取得，其中：
 
-- `NOTES_PATH = {VAULT_PATH}/{paper_notes_folder}`
-- `CONCEPTS_PATH = {NOTES_PATH}/{concepts_folder}`
-- `INBOX_PATH = {NOTES_PATH}/{inbox_folder}`
-- `DAILY_PAPERS_PATH = {VAULT_PATH}/{daily_papers_folder}`
-- `GIT_PUSH_ENABLED` 只有在 `GIT_COMMIT_ENABLED=true` 时才可能为真
+- `VAULT_PATH = RUNTIME_CONTEXT.paths.vault`
+- `NOTES_PATH = RUNTIME_CONTEXT.paths.paper_notes`
+- `CONCEPTS_PATH = RUNTIME_CONTEXT.paths.concepts`
+- `INBOX_PATH = RUNTIME_CONTEXT.paths.inbox`
+- `DAILY_PAPERS_PATH = RUNTIME_CONTEXT.paths.daily_papers`
+- 自动化开关来自 `RUNTIME_CONTEXT.automation`
 
-后续步骤统一使用上面的变量。
+后续步骤统一使用上面的已验证值。
 
 ## 前置检查
 
@@ -47,26 +50,32 @@
 
 ## 工作流程
 
-### Phase 4: 扫描 Obsidian 笔记库索引 + 匹配已有论文笔记
+### Phase 4: 确定性匹配已有论文笔记
 
-由当前 harness 会话直接完成，使用可用的文件扫描和读取能力检查 Obsidian 笔记库：
+不要让模型遍历整个 Vault 并自行猜测文件名。运行共享身份匹配器，把结果保存在
+当前 Run 目录，且不修改已登记的 `ENRICHED_INPUT`：
 
-1. 扫描 `{NOTES_PATH}/` 下所有分类目录（跳过 `_` 开头但保留
-   `{INBOX_PATH}`），列出每个分类下的 `.md` 文件名
-2. 扫描 `{CONCEPTS_PATH}/` 下所有主题目录，列出每个主题下的概念笔记
-3. 生成索引文本，格式：
-
-```
-### 分类名
-  - [[笔记名]] (相对路径)
-### 概念/主题名
-  - [[概念1]], [[概念2]], ...
+```bash
+python3 "{SKILL_ROOT}/scripts/shared/paper_identity.py" match \
+  --papers "{ENRICHED_INPUT}" \
+  --notes-dir "{NOTES_PATH}" \
+  --concepts-dir "{CONCEPTS_PATH}" \
+  --vault "{VAULT_PATH}" \
+  --output "{RUN_MANIFEST所在目录}/note-matches.json"
 ```
 
-4. **匹配已有论文笔记**：将候选论文与笔记库中的论文笔记进行匹配。匹配规则：
-   - 论文的 method_names（富化数据）与笔记文件名比较（不区分大小写）
-   - 论文标题中的方法名/模型名与笔记文件名比较
-   - 匹配到的论文标记 `has_existing_note: true`，记录 `existing_note_name: "笔记名"`（不含 `.md`）
+读取 `note-matches.json`，按以下规则使用：
+
+1. `status=exact`：稳定 `paper_id` 唯一匹配，标记
+   `has_existing_note: true`，wikilink 使用 `note.wikilink`。
+2. `status=fallback`：旧笔记缺少稳定 ID，但方法名或完整标题只命中一个文件；可以
+   当作已有笔记，同时在后续精读时补写稳定身份字段。
+3. `status=ambiguous`：有多个候选，绝不自动选择或覆盖；本次按“无可靠已有笔记”
+   处理，并把候选路径保留在报告 metadata 中。
+4. `status=missing`：按无已有笔记处理。
+
+该脚本只读取论文笔记并跳过概念树；同名文件不会在索引中静默覆盖。点评阶段无需
+扫描全部概念笔记，正文只链接本篇实际使用的相关概念，缺失概念由 notes 阶段创建。
 
 ### Phase 5: 毒舌点评
 
@@ -235,7 +244,8 @@ tags: [daily-papers, auto-generated]
      ```bash
      python3 "{SKILL_ROOT}/scripts/review/update_history.py" \
        --from-recommendation "{DAILY_PAPERS_PATH}/YYYY-MM-DD-论文推荐.md" \
-       --date YYYY-MM-DD
+       --date YYYY-MM-DD \
+       --history-file "{DAILY_PAPERS_PATH}/.history.json"
      ```
    - 读取 `{DAILY_PAPERS_PATH}/.history.json`（不存在则创建空数组）
    - 提取本次推荐的所有 arXiv ID + 标题，追加为 `{"id": "XXXX", "date": "YYYY-MM-DD", "title": "..."}`
@@ -255,29 +265,49 @@ tags: [daily-papers, auto-generated]
 
 ## 输出
 
-完成后向父 workflow 返回结构化报告（路径使用真实绝对 artifact 路径和 Vault
-相对 changed path）：
+完成后读取 `{SKILL_ROOT}/references/stage-report.md`，把报告写到
+`RUN_MANIFEST` 同目录的 `review-result.json`：
 
 ```json
 {
+  "version": 1,
   "stage": "review",
   "result": "success",
   "artifacts": [
-    {"role": "recommendation", "path": "<推荐 Markdown 绝对路径>"},
-    {"role": "history", "path": "<.history.json 绝对路径>"}
+    {
+      "role": "recommendation",
+      "scope": "vault",
+      "path": "DailyPapers/YYYY-MM-DD-论文推荐.md"
+    },
+    {"role": "history", "scope": "vault", "path": "DailyPapers/.history.json"},
+    {
+      "role": "note-matches",
+      "scope": "run",
+      "path": "note-matches.json"
+    }
   ],
   "changed_paths": [
     "DailyPapers/YYYY-MM-DD-论文推荐.md",
     "DailyPapers/.history.json"
   ],
-  "counts": {"recommended": 0, "must_read": 0, "worth_reading": 0, "skip": 0}
+  "metadata": {
+    "counts": {
+      "recommended": 0,
+      "must_read": 0,
+      "worth_reading": 0,
+      "skip": 0,
+      "existing_exact": 0,
+      "existing_fallback": 0,
+      "ambiguous": 0
+    }
+  }
 }
 ```
 
-父流程验证报告后负责调用 `run_coordinator.py submit --result success`，登记
-artifacts/changed paths 并推进到 notes。失败时只返回
-`recoverable`/`attention`/`deterministic-failure` 分类建议、证据和已安全落盘
-路径，不得写运行状态。
+示例路径必须替换为配置解析出的真实 Vault 相对路径。父流程用
+`run_coordinator.py submit --report` 推进到 notes。失败时写同一路径的报告，
+使用 `recoverable`、`attention` 或 `deterministic-failure` 和非空 `message`；
+证据放入 `metadata`，不得写运行状态。
 
 告知用户：
 - 推荐了多少篇论文

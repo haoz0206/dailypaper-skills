@@ -27,8 +27,9 @@ description: |
 ## 执行
 
 读取并完整执行 `{SKILL_ROOT}/workflows/daily.md`。该 workflow 会自行按顺序读取
-内部 `fetch.md`、`review.md`、`notes.md` 和私有 `paper-reader.md`。这些内部文件
-不是独立 Skill，不响应用户直接调用，也不自行取得任务所有权。
+内部 `fetch.md`、`review.md` 和 `notes.md`；`notes.md` 直接调用非 discoverable
+的 `references/paper-reader/reading-core.md`。内部 workflow 与 reference 不响应
+用户直接调用，也不自行取得任务所有权。
 
 手动论文阅读、MOC 刷新和配置请求分别由公共 `paper-reader`、`generate-mocs` 和
 `configure-dailypaper` Skill 响应；不要从本 Skill 的 metadata 抢占这些请求。

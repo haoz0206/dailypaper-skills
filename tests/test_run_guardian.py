@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 SHARED_DIR = (
@@ -49,6 +50,7 @@ class RunGuardianTests(unittest.TestCase):
         *,
         idle_timeout: float = 30.0,
         owner_pid: int | None = None,
+        vault_lock: Path | None = None,
     ) -> subprocess.Popen[str]:
         command = [
             sys.executable,
@@ -67,6 +69,8 @@ class RunGuardianTests(unittest.TestCase):
                     run_guardian.process_start_marker(owner_pid),
                 ]
             )
+        if vault_lock is not None:
+            command.extend(["--vault-lock", str(vault_lock)])
         process = subprocess.Popen(
             command,
             stdout=subprocess.DEVNULL,
@@ -119,6 +123,42 @@ class RunGuardianTests(unittest.TestCase):
                 capability="wrong-capability",
             )
 
+    def test_session_reader_rejects_symlink_and_oversize_file(self) -> None:
+        self.run_dir.mkdir()
+        paths = run_guardian.GuardianPaths.for_run(self.run_dir)
+        outside = Path(self.temporary.name) / "outside-session.json"
+        outside.write_text(
+            '{"version":1,"capability":"outside"}',
+            encoding="utf-8",
+        )
+        paths.session.symlink_to(outside)
+        with self.assertRaises(run_guardian.GuardianUnavailable):
+            run_guardian.probe_guardian(self.run_dir)
+
+        paths.session.unlink()
+        paths.session.write_bytes(
+            b"{" + b" " * run_guardian.MAX_SESSION_BYTES + b"}"
+        )
+        with self.assertRaises(run_guardian.GuardianUnavailable):
+            run_guardian.probe_guardian(self.run_dir)
+
+    def test_execution_lock_does_not_follow_symlink(self) -> None:
+        self.run_dir.mkdir()
+        outside = Path(self.temporary.name) / "outside.lock"
+        outside.write_text("user", encoding="utf-8")
+        lock = self.run_dir / run_guardian.LOCK_NAME
+        lock.symlink_to(outside)
+        guardian = run_guardian.RunGuardian(self.run_dir)
+
+        with self.assertRaisesRegex(
+            run_guardian.GuardianUnavailable,
+            "Run execution lock must not be a symlink",
+        ):
+            guardian._acquire()
+
+        self.assertEqual(outside.read_text(encoding="utf-8"), "user")
+        self.assertTrue(lock.is_symlink())
+
     def test_second_guardian_fails_non_blocking(self) -> None:
         first = self._launch()
         self._wait_until_ready(first)
@@ -142,12 +182,204 @@ class RunGuardianTests(unittest.TestCase):
         self.assertIn("already-running", second.stdout)
         self.assertEqual(run_guardian.probe_guardian(self.run_dir)["pid"], first.pid)
 
+    def test_vault_writer_lock_excludes_different_run_directories(self) -> None:
+        vault_lock = Path(self.temporary.name) / "git" / "vault-writer.lock"
+        first_run = Path(self.temporary.name) / "first-run"
+        second_run = Path(self.temporary.name) / "second-run"
+        first = self._launch_for(first_run, vault_lock=vault_lock)
+        self._wait_until_ready(first, first_run)
+
+        second = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "serve",
+                str(second_run),
+                "--vault-lock",
+                str(vault_lock),
+                "--idle-timeout",
+                "30",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+
+        self.assertEqual(second.returncode, 3)
+        self.assertIn("already-running", second.stdout)
+        status_result = run_guardian.guardian_status(first_run)
+        self.assertEqual(status_result["vault_lock_path"], str(vault_lock.resolve()))
+
+    def test_short_lived_writer_uses_the_same_non_blocking_lock(self) -> None:
+        vault = Path(self.temporary.name) / "vault"
+        subprocess.run(
+            ["git", "init", "--initial-branch=main", str(vault)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        with run_guardian.hold_vault_writer_lock(vault):
+            with self.assertRaises(run_guardian.GuardianAlreadyRunning):
+                with run_guardian.hold_vault_writer_lock(vault):
+                    self.fail("nested writer lock must not be acquired")
+
+        with run_guardian.hold_vault_writer_lock(vault):
+            pass
+
+    def test_ensure_guardian_running_is_idempotent_and_uses_vault_lock(self) -> None:
+        vault = Path(self.temporary.name) / "vault"
+        subprocess.run(
+            ["git", "init", "--initial-branch=main", str(vault)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        try:
+            first = run_guardian.ensure_guardian_running(
+                self.run_dir,
+                vault=vault,
+                idle_timeout_seconds=30,
+                ready_timeout_seconds=3,
+            )
+            second = run_guardian.ensure_guardian_running(
+                self.run_dir,
+                vault=vault,
+                idle_timeout_seconds=30,
+                ready_timeout_seconds=3,
+            )
+            self.assertEqual(second["pid"], first["pid"])
+            status_result = run_guardian.guardian_status(self.run_dir)
+            self.assertEqual(
+                status_result["vault_lock_path"],
+                str(run_guardian.vault_writer_lock_path(vault)),
+            )
+        finally:
+            try:
+                run_guardian.stop_guardian(self.run_dir)
+            except run_guardian.GuardianError:
+                pass
+
+    def test_ensure_guardian_running_defaults_to_no_idle_expiry(self) -> None:
+        vault = Path(self.temporary.name) / "vault"
+        subprocess.run(
+            ["git", "init", "--initial-branch=main", str(vault)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        try:
+            started = run_guardian.ensure_guardian_running(
+                self.run_dir,
+                vault=vault,
+                ready_timeout_seconds=3,
+            )
+            status_result = run_guardian.guardian_status(self.run_dir)
+            self.assertEqual(status_result["pid"], started["pid"])
+            self.assertIsNone(status_result["idle_timeout_seconds"])
+        finally:
+            try:
+                run_guardian.stop_guardian(self.run_dir)
+            except run_guardian.GuardianError:
+                pass
+
+    def test_ensure_guardian_running_rejects_mismatched_vault_lock(self) -> None:
+        first_vault = Path(self.temporary.name) / "first-vault"
+        second_vault = Path(self.temporary.name) / "second-vault"
+        for vault in (first_vault, second_vault):
+            subprocess.run(
+                ["git", "init", "--initial-branch=main", str(vault)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        try:
+            run_guardian.ensure_guardian_running(
+                self.run_dir,
+                vault=first_vault,
+                idle_timeout_seconds=30,
+                ready_timeout_seconds=3,
+            )
+            with self.assertRaisesRegex(
+                run_guardian.GuardianUnavailable,
+                "different Vault writer lock",
+            ):
+                run_guardian.ensure_guardian_running(
+                    self.run_dir,
+                    vault=second_vault,
+                    idle_timeout_seconds=30,
+                    ready_timeout_seconds=3,
+                )
+        finally:
+            try:
+                run_guardian.stop_guardian(self.run_dir)
+            except run_guardian.GuardianError:
+                pass
+
+    def test_ensure_guardian_running_cleans_up_startup_timeout(self) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.terminated = False
+
+            def poll(self):
+                return 0 if self.terminated else None
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def wait(self, *, timeout: float):
+                return 0
+
+            def kill(self) -> None:
+                raise AssertionError("kill should not be needed after terminate")
+
+        process = FakeProcess()
+        unavailable = run_guardian.GuardianUnavailable("not ready")
+        with (
+            patch.object(run_guardian, "guardian_status", side_effect=unavailable),
+            patch.object(
+                run_guardian,
+                "vault_writer_lock_path",
+                return_value=Path(self.temporary.name) / "writer.lock",
+            ),
+            patch.object(run_guardian.subprocess, "Popen", return_value=process),
+            self.assertRaisesRegex(
+                run_guardian.GuardianUnavailable,
+                "did not become ready",
+            ),
+        ):
+            run_guardian.ensure_guardian_running(
+                self.run_dir,
+                vault=Path(self.temporary.name),
+                idle_timeout_seconds=30,
+                ready_timeout_seconds=0.001,
+            )
+        self.assertTrue(process.terminated)
+
+    def test_ensure_guardian_running_rejects_non_finite_timeouts(self) -> None:
+        for value in (0.0, -1.0, float("nan"), float("inf")):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                run_guardian.ensure_guardian_running(
+                    self.run_dir,
+                    vault=Path(self.temporary.name),
+                    idle_timeout_seconds=value,
+                )
+            with self.subTest(ready=value), self.assertRaises(ValueError):
+                run_guardian.ensure_guardian_running(
+                    self.run_dir,
+                    vault=Path(self.temporary.name),
+                    ready_timeout_seconds=value,
+                )
+
     def test_stop_releases_lock_and_allows_restart(self) -> None:
         first = self._launch()
         self._wait_until_ready(first)
 
         response = run_guardian.stop_guardian(self.run_dir)
         self.assertEqual(response["action"], "stop")
+        with self.assertRaises(run_guardian.GuardianUnavailable):
+            run_guardian.probe_guardian(self.run_dir)
         self._wait_until_exit(first)
 
         second = self._launch()

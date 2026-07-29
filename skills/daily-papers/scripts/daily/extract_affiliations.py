@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Extract affiliations from PDF text (pdftotext -l 2 output via stdin).
+"""Extract affiliations from an already bounded pdftotext result on stdin.
 
 Usage:
-    curl -sL "https://arxiv.org/pdf/{arxiv_id}" | pdftotext -l 2 - - | python3 extract_affiliations.py
+    python3 extract_affiliations.py < /tmp/bounded-paper-text.txt
 
 Output:
     {"affiliations": ["Tsinghua University", "UC Berkeley"]}
@@ -10,6 +10,9 @@ Output:
 import json
 import re
 import sys
+
+
+MAX_INPUT_CHARS = 4 * 1024 * 1024
 
 
 # ── Institution keywords (case-insensitive matching) ──────────────────────
@@ -351,14 +354,27 @@ def extract_affiliations(text: str) -> list:
     return sorted(final)
 
 
-def main():
-    text = sys.stdin.read()
+def main() -> int:
+    text = sys.stdin.read(MAX_INPUT_CHARS + 1)
+    if len(text) > MAX_INPUT_CHARS:
+        print(
+            json.dumps(
+                {
+                    "error": (
+                        f"input exceeds the {MAX_INPUT_CHARS}-character limit"
+                    )
+                }
+            ),
+            file=sys.stderr,
+        )
+        return 2
     if not text or len(text.strip()) < 50:
         print(json.dumps({"affiliations": []}))
-        return
+        return 0
     affs = extract_affiliations(text)
     print(json.dumps({"affiliations": affs}, ensure_ascii=False))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

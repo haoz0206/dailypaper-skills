@@ -26,36 +26,26 @@ _SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
 if str(_SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(_SHARED_DIR))
 
+from paper_identity import NoteIndex, build_note_index, match_paper_to_note
+from safe_io import SafeIOError, atomic_write_bytes, read_regular_bytes
 from user_config import concepts_dir, obsidian_vault_path, paper_notes_dir
+
+MAX_RECOMMENDATION_BYTES = 16 * 1024 * 1024
 
 
 def scan_notes(
     notes_dir: Path | None = None,
     concepts_path: Path | None = None,
-) -> dict:
-    """Scan notes directory and build index of {method_name: note_path}."""
-    notes_index = {}
+    vault: Path | None = None,
+) -> NoteIndex:
+    """Build a collision-preserving stable-identity index of paper notes."""
     notes_dir = (notes_dir or paper_notes_dir()).resolve()
     concepts_path = (concepts_path or concepts_dir()).resolve()
-
-    if not notes_dir.exists():
-        return notes_index
-
-    # Scan all subdirectories except the configured concepts tree.
-    for md_file in notes_dir.rglob('*.md'):
-        # Skip concept notes
-        resolved_file = md_file.resolve()
-        if resolved_file.parent == concepts_path or concepts_path in resolved_file.parents:
-            continue
-
-        # Use filename (without .md) as method name
-        method_name = md_file.stem
-        notes_index[method_name.lower()] = {
-            'name': method_name,
-            'path': md_file.relative_to(notes_dir.parent),
-        }
-
-    return notes_index
+    return build_note_index(
+        notes_dir,
+        concepts_dir=concepts_path,
+        vault=(vault or obsidian_vault_path()).resolve(),
+    )
 
 
 def extract_method_name_from_title(title: str) -> str:
@@ -75,7 +65,7 @@ def extract_method_name_from_title(title: str) -> str:
     return title.split()[0] if title else ""
 
 
-def match_papers_with_notes(content: str, notes_index: dict) -> list:
+def match_papers_with_notes(content: str, notes_index: NoteIndex) -> list:
     """Match papers in recommendation with existing notes.
 
     Returns list of dicts with paper_title, method_name, note_name, section_start, source_line_end
@@ -89,11 +79,14 @@ def match_papers_with_notes(content: str, notes_index: dict) -> list:
 
         # Find the next section end
         next_section = re.search(r'^### (?:\d+\.|\w)', content[section_start + 1:], re.MULTILINE)
-        section_end = section_start + next_section.start() if next_section else len(content)
+        section_end = (
+            section_start + 1 + next_section.start()
+            if next_section
+            else len(content)
+        )
 
         section_content = content[section_start:section_end]
 
-        # Extract method name from title
         method_name = extract_method_name_from_title(paper_title)
 
         # Look for "来源" line
@@ -104,16 +97,28 @@ def match_papers_with_notes(content: str, notes_index: dict) -> list:
         source_line_end = source_match.end()
 
         # Check if note link already exists
-        if re.search(r'- 📒 \*\*笔记\*\*:', section_content):
+        if re.search(r'- 📒 \*\*(?:已有)?笔记\*\*:', section_content):
             continue  # Already has note link
 
-        # Try to match with existing notes
-        method_lower = method_name.lower()
-        if method_lower in notes_index:
+        arxiv_match = re.search(
+            r"https?://(?:www\.)?arxiv\.org/(?:abs|pdf)/[^\s)|]+",
+            section_content,
+            re.IGNORECASE,
+        )
+        paper = {
+            "title": paper_title,
+            "method_names": [method_name] if method_name else [],
+            "url": arxiv_match.group(0) if arxiv_match else "",
+        }
+        matched = match_paper_to_note(paper, notes_index)
+        if matched["status"] in {"exact", "fallback"}:
+            note = matched["note"]
             matches.append({
                 'paper_title': paper_title,
                 'method_name': method_name,
-                'note_name': notes_index[method_lower]['name'],
+                'note_name': note["wikilink"],
+                'note_path': note["path"],
+                'match_basis': matched["basis"],
                 'section_start': section_start,
                 'source_line_end': section_start + source_line_end,
             })
@@ -121,10 +126,21 @@ def match_papers_with_notes(content: str, notes_index: dict) -> list:
     return matches
 
 
-def backfill_links(recommendation_path: Path, notes_index: dict) -> int:
+def backfill_links(recommendation_path: Path, notes_index: NoteIndex) -> int:
     """Backfill note links to recommendation file."""
-    with open(recommendation_path, 'r', encoding='utf-8') as f:
-        content = f.read()
+    try:
+        raw = read_regular_bytes(
+            recommendation_path,
+            max_bytes=MAX_RECOMMENDATION_BYTES,
+            label="Recommendation",
+        )
+        if raw is None:
+            raise SafeIOError(
+                f"Recommendation file does not exist: {recommendation_path}"
+            )
+        content = raw.decode("utf-8")
+    except (SafeIOError, UnicodeDecodeError) as exc:
+        raise ValueError(f"Cannot safely read recommendation: {exc}") from exc
 
     matches = match_papers_with_notes(content, notes_index)
 
@@ -141,24 +157,18 @@ def backfill_links(recommendation_path: Path, notes_index: dict) -> int:
             content[match['source_line_end']:]
         )
 
-    with open(recommendation_path, 'w', encoding='utf-8') as f:
-        f.write(content)
-
-    # Update 分流表 wikilinks
-    update_diversion_table(recommendation_path, notes_index, matches)
+    content = update_diversion_table_content(content, matches)
+    _atomic_write_text(recommendation_path, content)
 
     return len(matches)
 
 
-def update_diversion_table(recommendation_path: Path, notes_index: dict, matches: list):
-    """Update the 分流表 section to use correct wikilink names."""
-    with open(recommendation_path, 'r', encoding='utf-8') as f:
-        content = f.read()
-
+def update_diversion_table_content(content: str, matches: list) -> str:
+    """Return content with matched diversion-table wikilinks corrected."""
     # Find 分流表 section
     table_match = re.search(r'^## 分流表$.+?(?=^##|\Z)', content, re.MULTILINE | re.DOTALL)
     if not table_match:
-        return
+        return content
 
     table_start = table_match.start()
     table_end = table_match.end()
@@ -166,32 +176,39 @@ def update_diversion_table(recommendation_path: Path, notes_index: dict, matches
 
     # Update wikilinks for papers that have notes
     for match in matches:
-        # Find the paper in the table and update its wikilink
-        # Pattern: [[current_link]]（description）
-        old_pattern = rf'\[\[([^\]]+)\]\]（[^)]*{re.escape(match["method_name"])}[^)]*）'
-        new_text = f'[[{match["note_name"]}]]'
-
-        # Check if the link needs updating
         if match['method_name'].lower() != match['note_name'].lower():
-            # Update the wikilink but keep the description
             table_content = re.sub(
                 rf'\[\[{re.escape(match["method_name"])}\]\]',
                 f'[[{match["note_name"]}]]',
                 table_content,
+                count=1,
                 flags=re.IGNORECASE
             )
 
     # Replace the table in content
-    content = content[:table_start] + table_content + content[table_end:]
+    return content[:table_start] + table_content + content[table_end:]
 
-    with open(recommendation_path, 'w', encoding='utf-8') as f:
-        f.write(content)
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Atomically replace one recommendation without a shared temp filename."""
+    try:
+        atomic_write_bytes(
+            path,
+            content.encode("utf-8"),
+            mode=0o644,
+            preserve_existing_mode=True,
+            label="Recommendation",
+        )
+    except SafeIOError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def main():
     parser = argparse.ArgumentParser(description='Backfill paper note links')
     parser.add_argument('--recommendation', required=True, help='Path to recommendation file')
     parser.add_argument('--notes-dir', type=Path, help='Path to notes directory (default: from config)')
+    parser.add_argument('--concepts-dir', type=Path)
+    parser.add_argument('--vault', type=Path)
 
     args = parser.parse_args()
 
@@ -200,13 +217,22 @@ def main():
         print(f"Error: Recommendation file not found: {recommendation_path}", file=sys.stderr)
         sys.exit(1)
 
-    notes_dir = args.notes_dir
-    if notes_dir and not notes_dir.is_absolute():
-        notes_dir = obsidian_vault_path() / notes_dir
+    explicit_paths = (args.vault, args.notes_dir, args.concepts_dir)
+    if any(path is not None for path in explicit_paths) and not all(
+        path is not None for path in explicit_paths
+    ):
+        parser.error("--vault, --notes-dir and --concepts-dir must be provided together")
+    vault = args.vault.resolve() if args.vault else None
+    notes_dir = args.notes_dir.resolve() if args.notes_dir else None
+    concepts_path = args.concepts_dir.resolve() if args.concepts_dir else None
 
     # Scan notes
-    notes_index = scan_notes(notes_dir=notes_dir)
-    print(f"Found {len(notes_index)} paper notes")
+    notes_index = scan_notes(
+        notes_dir=notes_dir,
+        concepts_path=concepts_path,
+        vault=vault,
+    )
+    print(f"Found {len(notes_index.records)} paper notes")
 
     # Backfill links
     count = backfill_links(recommendation_path, notes_index)

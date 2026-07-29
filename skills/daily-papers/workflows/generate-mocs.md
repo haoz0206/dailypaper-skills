@@ -2,96 +2,49 @@
 
 这个 skill 用于手动补刷 Obsidian 里的目录页 / 导航页（MOC）。
 
-## Step 0: 读取共享配置
+## Step 0: 启动或恢复独立写入会话
 
-使用公开 Skill 已解析的 `SKILL_ROOT`。先运行：
+必须先完整读取 `{SKILL_ROOT}/references/standalone-session.md`，只通过其中的
+`standalone_coordinator.py start` 接口启动或恢复，固定使用
+`operation=generate-mocs`、`intent=scope:all`。只在 `decision=ready` 时继续；
+复用返回的 `SESSION_ID` 和 `RUNTIME_CONTEXT`，并只从其 `paths` 取得
+`VAULT_PATH`、`NOTES_PATH` 和 `CONCEPTS_PATH`。onboarding、同步、日报互斥、
+Vault writer 锁、恢复和取消完全以共享契约为准，不得另做 preflight 或手工配置。
+工作树原有 dirty 内容必须保留；若 coordinator 判定只能本地完成，结果中明确
+说明未发布。
 
-```bash
-python3 "{SKILL_ROOT}/scripts/shared/machine_config.py" validate
-```
+## Step 1: 执行生成
 
-如果本机配置不存在或无效，停止并要求用户先运行公共
-`configure-dailypaper` Skill；不得回退到当前目录。
-
-然后读取
-`{SKILL_ROOT}/scripts/shared/user-config.json` 和可选的 `user-config.local.json`。
-
-显式生成并在后续统一使用这些变量：
-
-- `VAULT_PATH`
-- `NOTES_PATH`
-- `CONCEPTS_PATH`
-- `AUTO_REFRESH_INDEXES`
-- `GIT_COMMIT_ENABLED`
-- `GIT_PUSH_ENABLED`
-
-其中：
-
-- `NOTES_PATH = {VAULT_PATH}/{paper_notes_folder}`
-- `CONCEPTS_PATH = {NOTES_PATH}/{concepts_folder}`
-- `GIT_PUSH_ENABLED` 只有在 `GIT_COMMIT_ENABLED=true` 时才可能为真
-
-后续步骤统一使用上面的变量。
-
-## Step 1: 写入前安全检查
-
-1. 确认 `VAULT_PATH` 是配置的 Vault，而不是 Skills 仓库。
-2. 如果它是协调的 Git Vault，验证 `origin` 和 `main`；工作树干净时先执行
-   `git pull --ff-only origin main`。
-3. 运行：
-
-   ```bash
-   python3 "{SKILL_ROOT}/scripts/configure/config_manager.py" \
-     --vault "{VAULT_PATH}" guard
-   ```
-
-4. 日报任务状态是 `running` 时停止，不得与日报同时重写 MOC。
-5. 工作树不干净时允许生成本地 MOC，但不得自动 commit/push，并必须在结果中说明
-   本次不是已同步快照。
-
-## Step 2: 执行生成
-
-1. 运行概念目录页脚本：
+1. 用一个命令刷新概念和论文目录页：
 
 ```bash
-python3 "{SKILL_ROOT}/scripts/shared/generate_concept_mocs.py"
+python3 "{SKILL_ROOT}/scripts/shared/refresh_mocs.py" \
+  --scope all --protect-dirty \
+  --vault-root "{VAULT_PATH}" \
+  --notes-root "{NOTES_PATH}" \
+  --concepts-root "{CONCEPTS_PATH}"
 ```
 
-2. 运行论文目录页脚本：
-
-```bash
-python3 "{SKILL_ROOT}/scripts/shared/generate_paper_mocs.py"
-```
-
-3. 合并两个脚本 JSON 输出中的 `changed_paths`，去重后作为本次唯一可暂存路径。
-4. 汇报：
+2. 直接使用 JSON 输出中的 `changed_paths` 作为本次唯一可暂存路径，不再自行
+   合并或猜测。
+   如果某个目标 MOC 在开始前已经是 dirty，命令会拒绝覆盖并保留用户修改。
+3. 汇报：
    - 扫描了多少个目录
    - 新建 / 更新了多少个目录页
    - 目录页文件写到了哪里
 
-## git 自动化
+## 会话提交和 Git 自动化
 
-默认配置下：
-
-- `AUTO_REFRESH_INDEXES=true`
-- `GIT_COMMIT_ENABLED=false`
-- `GIT_PUSH_ENABLED=false`
-
-只有在 `GIT_COMMIT_ENABLED=true` 时才做 git 操作，并且必须先检查：
-
-1. `VAULT_PATH/.git` 是否存在
-2. 开始运行时工作树是否干净
-3. 从脚本输出的 `changed_paths` 收集本次实际新建或更新的 MOC 文件
-4. 仅用 `git -C "{VAULT_PATH}" add -- {本次 MOC 路径...}` 精确暂存
-5. 暂存区是否真的有变更，并且不包含本次运行之外的文件
-
-只有在上面各项都满足时才 commit。
-
-只有在 `GIT_PUSH_ENABLED=true` 且仓库已配置远端时才 push。
+严格按共享 contract 的 **Submit changed paths**，把刷新脚本返回的每个精确
+`changed_paths` 与 `SESSION_ID`、`result=success` 交给 coordinator；没有变化时
+不传路径。不得自行计算 SHA-256、手写 report 或执行 Git；只有委派 worker 已产生
+冻结 report 时才走契约中的 `--report` 分支。`completed-local`、`unchanged`
+以及可恢复 commit/push 的语义均以 coordinator 返回值为准。
 
 ## 结果要求
 
 - 目录页生成逻辑必须来自仓库自带脚本，不依赖 `VAULT_PATH/scripts/*`
 - 重复运行应保持幂等
 - 用户手动运行这个 skill 时，不受 `AUTO_REFRESH_INDEXES` 开关影响
-- Git 自动化只能使用两个脚本返回的精确 `changed_paths`
+- Git 自动化只能使用刷新脚本返回并经 coordinator 校验的精确
+  `changed_paths`

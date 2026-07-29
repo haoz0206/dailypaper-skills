@@ -12,11 +12,12 @@
 请求解释为直接运行本阶段。即使是维护者调试，也必须由父 workflow 先通过
 `run_coordinator.py start` 建立或恢复 run。
 
-## Step 0: 读取共享配置
+## Step 0: 使用父流程的运行时上下文
 
-使用公开 Skill 已解析的 `SKILL_ROOT`。先读取
-`{SKILL_ROOT}/scripts/shared/user-config.json`；如果同目录的 `user-config.local.json`
-存在，再用它覆盖默认值。也允许 `DAILYPAPER_CONFIG` 指向外部配置。
+父流程必须同时传入同一个只读 `RUNTIME_CONTEXT`，且其 `status=ready`、
+`paths.vault` 与 Manifest 中的 Vault 完全一致、
+`configuration_fingerprint` 与 Manifest 完全一致。缺失或不一致时停止；本阶段
+不得重新运行预检、读取配置文件或自行合并覆盖层。
 
 显式生成并在后续统一使用这些变量：
 
@@ -30,37 +31,31 @@
 - `TOP_N`
 - `TIMEZONE`
 - `RUN_MANIFEST`
+- `RUNTIME_CONTEXT_FILE`
 - `CANDIDATES_OUTPUT`
 - `ENRICHED_OUTPUT`
 
-其中：
+所有路径和配置值只从 `RUNTIME_CONTEXT` 或 `RUN_MANIFEST.paths` 取得，其中：
 
-- `DAILY_PAPERS_PATH = {VAULT_PATH}/{daily_papers_folder}`
-- `TIMEZONE = runtime.timezone`
-- 所有关键词、分类、阈值都以共享配置为准
+- `VAULT_PATH = RUNTIME_CONTEXT.paths.vault`
+- `DAILY_PAPERS_PATH = RUNTIME_CONTEXT.paths.daily_papers`
+- `TIMEZONE = RUNTIME_CONTEXT.runtime.timezone`
+- 所有关键词、分类、阈值来自 `RUNTIME_CONTEXT.daily_papers`
 - `CANDIDATES_OUTPUT` 和 `ENRICHED_OUTPUT` 必须从 `RUN_MANIFEST.paths` 读取
+- `RUNTIME_CONTEXT_FILE` 必须直接使用 Coordinator 返回的绝对
+  `runtime_context_file`
 
 确认父流程提供的 Coordinator 决策是 `ready`、`RUN_MANIFEST` 存在且 phase 为
 `fetching`。没有 manifest 或任何其他 phase 都停止；内部阶段不得创建、修改
 Manifest，不得取得/释放任务所有权，也不得直接写 Vault Task State 或运行 Git。
 
-后续统一以共享配置和上面的变量为准。
+后续统一以上面的已验证值为准。
 
-## 解析天数
+## 冻结的抓取窗口
 
-从用户输入中解析 `--days N` 参数。匹配规则：
-- "过去一周"、"最近7天"、"一周的论文" → `--days 7`
-- "过去3天"、"最近三天"、"抓3天" → `--days 3`
-- "过去两周" → `--days 14`
-- 无特殊指定 → 不加 `--days`（默认当天）
-
-将解析出的天数存为变量 `DAYS_ARG`，在后续脚本调用中使用。
-
-## 配置来源
-
-- 默认配置在 `{SKILL_ROOT}/scripts/shared/user-config.json`
-- 个人覆盖配置放在 `{SKILL_ROOT}/scripts/shared/user-config.local.json`
-- 如果两者都存在，以 `local` 为准
+只从 `RUN_MANIFEST.window_days` 读取 `WINDOW_DAYS`。它由父流程在首次 start 前解析，
+并已绑定到远程 Task State；本阶段不得从当前 prompt 重解析、采用默认值或修改它。
+再次验证它是 1–31 的整数，不满足时停止并报告 Manifest 错误。
 
 ## 工作流程
 
@@ -69,16 +64,10 @@ Manifest，不得取得/释放任务所有权，也不得直接写 Vault Task St
 用 `fetch_and_score.py` 一步完成 HF + arXiv 抓取、打分、合并去重、历史去重、选 Top 30。**零 token 消耗。**
 
 ```bash
-# 默认：当天
 python3 "{SKILL_ROOT}/scripts/daily/fetch_and_score.py" \
-  --date YYYY-MM-DD --timezone "{TIMEZONE}" --output "{CANDIDATES_OUTPUT}"
-
-# 多天模式（将 N 替换为解析出的天数）
-python3 "{SKILL_ROOT}/scripts/daily/fetch_and_score.py" \
-  --date YYYY-MM-DD --timezone "{TIMEZONE}" --days N --output "{CANDIDATES_OUTPUT}"
+  --runtime-context "{RUNTIME_CONTEXT_FILE}" \
+  --date YYYY-MM-DD --days "{WINDOW_DAYS}" --output "{CANDIDATES_OUTPUT}"
 ```
-
-根据前面解析的 `DAYS_ARG`，如果用户指定了天数就加 `--days N`，否则不加。
 
 脚本自动完成：
 - 并行抓取 HuggingFace Daily + Trending API 和 arXiv API
@@ -94,8 +83,8 @@ python3 "{SKILL_ROOT}/scripts/daily/fetch_and_score.py" \
 
 ### Phase 3: 批量富化（enrich_papers.py 脚本）
 
-用 `enrich_papers.py` 脚本一次性富化所有论文。脚本使用 `asyncio` + `curl`
-子进程并发请求，纯 regex 解析 HTML，不依赖宿主专用网页工具。
+用 `enrich_papers.py` 脚本一次性富化所有论文。脚本使用 `asyncio` 和共享的
+有界 HTTP 客户端并发请求，纯 regex 解析 HTML，不依赖宿主专用网页工具。
 
 ```bash
 python3 "{SKILL_ROOT}/scripts/daily/enrich_papers.py" \
@@ -107,11 +96,12 @@ python3 "{SKILL_ROOT}/scripts/daily/enrich_papers.py" \
 脚本自动完成以下工作（Semaphore(10) 限制并发，单篇超时 30 秒）：
 - 并行抓取 HTML 页面 + PDF 页面
 - 从 HTML 提取：figure_url、authors、affiliations、section_headers、captions、has_real_world、method_names、method_summary
-- 从 PDF 提取：affiliations（通过 `pdftotext | extract_affiliations.py`）
+- 从 PDF 提取：先通过共享 HTTP 边界下载到隔离临时目录，再用受限的
+  `pdftotext` 读取前两页，并在进程内提取 affiliations
 - 如果 HTML authors 为空，fallback 到 abs 页面 `<meta>` 标签提取 authors/affiliations
 - 合并优先级（脚本内部处理）：
-  - figure_url: HTML curl
-  - affiliations: PDF > HTML > abs fallback > Phase 1 data
+  - figure_url: HTML
+  - affiliations: HTML > abs fallback > PDF > Phase 1 data
   - authors: HTML > abs fallback > Phase 1 data
   - 其他字段: HTML regex 提取
 
@@ -127,31 +117,33 @@ python3 "{SKILL_ROOT}/scripts/daily/enrich_papers.py" \
 
 ## 输出
 
-完成后检查 `ENRICHED_OUTPUT` 存在且包含有效 JSON 数组。向父 workflow 返回
-结构化报告：
+完成后检查 `ENRICHED_OUTPUT` 存在且包含有效 JSON 数组。读取
+`{SKILL_ROOT}/references/stage-report.md`，把以下内容写到
+`RUN_MANIFEST` 同目录的 `fetch-result.json`：
 
 ```json
 {
+  "version": 1,
   "stage": "fetch",
   "result": "success",
   "artifacts": [
-    {"role": "candidates", "path": "<CANDIDATES_OUTPUT>"},
-    {"role": "enriched", "path": "<ENRICHED_OUTPUT>"}
+    {"role": "candidates", "scope": "run", "path": "candidates.json"},
+    {"role": "enriched", "scope": "run", "path": "enriched.json"}
   ],
   "changed_paths": [],
-  "counts": {"candidates": 0, "enriched": 0}
+  "metadata": {"counts": {"candidates": 0, "enriched": 0}}
 }
 ```
 
-其中计数替换为真实值。父流程验证文件后负责用 `run_coordinator.py submit
---result success` 登记 artifacts 并推进 phase。本阶段只告知：
+其中路径使用 Manifest 中的真实 Run 相对路径，计数替换为真实值。父流程负责用
+`run_coordinator.py submit --report` 登记并推进 phase。本阶段只告知：
 - 抓取了多少篇论文
 - 富化成功多少篇
 - 把控制权返回父 workflow；不得要求用户另行调用内部阶段
 
-失败时不要写 Manifest 或协调状态。返回同样结构的报告，将 `result` 建议分类为
-`recoverable`、`attention` 或 `deterministic-failure`，并附 `message`、stderr
-摘要和已经安全落盘的 artifacts。最终分类和提交由父流程负责。
+失败时不要写 Manifest 或协调状态。把同样结构的报告写到 `fetch-result.json`，
+将 `result` 分类为 `recoverable`、`attention` 或 `deterministic-failure`，
+附非空 `message`，并把 stderr 摘要放入 `metadata`。最终提交由父流程负责。
 
 ## 注意事项
 

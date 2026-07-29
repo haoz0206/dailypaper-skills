@@ -14,23 +14,60 @@ Input:  JSON array via stdin or auto-detected file
 Output: JSON array via stdout or file with enriched fields added
 
 Architecture:
-    - asyncio + subprocess curl for concurrent HTTP requests
+    - asyncio + one shared bounded HTTP client
     - Semaphore(10) to avoid hammering arXiv
     - Pure regex HTML parsing (no host-specific web tool / no external Python deps)
-    - Per-request timeout via curl --max-time (no Python-level per-paper timeout)
+    - A bounded argument-vector subprocess only for local pdftotext
+    - Time/byte limits at every remote and tool boundary
 """
 from __future__ import annotations
 
 import asyncio
 import argparse
-import json
 import re
 import sys
+import tempfile
 from collections import Counter
 from pathlib import Path
 
+_SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
+if str(_SHARED_DIR) not in sys.path:
+    sys.path.insert(0, str(_SHARED_DIR))
+_DAILY_DIR = Path(__file__).resolve().parent
+if str(_DAILY_DIR) not in sys.path:
+    sys.path.insert(0, str(_DAILY_DIR))
+
+from safe_io import (
+    SafeIOError,
+    atomic_write_bytes,
+    encode_json_value,
+    parse_json_value,
+    read_regular_bytes,
+)
+from safe_http import (
+    FetchBudget,
+    ResponseTooLargeError,
+    SafeHTTPClient,
+    SafeHTTPError,
+)
+from safe_process import SafeProcessError, run_bounded_tool
+
+MAX_INPUT_BYTES = 32 * 1024 * 1024
+MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+MAX_INPUT_PAPERS = 10_000
+MAX_HTML_BYTES = 8 * 1024 * 1024
+MAX_PDF_BYTES = 64 * 1024 * 1024
+MAX_PDF_TEXT_BYTES = 4 * 1024 * 1024
+MAX_TOOL_LOG_BYTES = 64 * 1024
+MAX_TOTAL_ENRICH_BYTES = 512 * 1024 * 1024
+ENRICH_RUN_TIMEOUT_SECONDS = 30 * 60
+
+from paper_identity import canonical_arxiv_id
+from extract_affiliations import extract_affiliations
+
 SEMAPHORE_LIMIT = 10
-CURL_TIMEOUT = 30
+HTTP_TIMEOUT = 30
+HTTP_CLIENT = SafeHTTPClient()
 
 # ── Stop words for method_names extraction ──────────────────────────────────
 METHOD_STOP = {
@@ -92,26 +129,51 @@ INST_KEYWORDS = [
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# HTTP helpers
+# Remote and tool helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def curl_fetch(url: str, sem: asyncio.Semaphore, timeout: int = CURL_TIMEOUT,
-                     retries: int = 3) -> str:
-    """Fetch URL content using curl subprocess with retry. Returns empty string on failure."""
+async def fetch_text(
+    url: str,
+    sem: asyncio.Semaphore,
+    timeout: int = HTTP_TIMEOUT,
+    retries: int = 3,
+    *,
+    client: SafeHTTPClient | None = None,
+    budget: FetchBudget | None = None,
+) -> str:
+    """Fetch one bounded arXiv HTML page through the shared HTTP seam."""
+    active_client = client or HTTP_CLIENT
+    active_budget = budget or active_client.new_budget(
+        max_total_bytes=MAX_HTML_BYTES,
+        request_timeout_seconds=timeout,
+        run_timeout_seconds=timeout + 5,
+    )
     for attempt in range(1, retries + 1):
         async with sem:
             try:
-                proc = await asyncio.create_subprocess_exec(
-                    "curl", "-sL", "--max-time", str(timeout), url,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.DEVNULL,
+                response = await asyncio.to_thread(
+                    active_client.fetch_bytes,
+                    url,
+                    max_bytes=MAX_HTML_BYTES,
+                    budget=active_budget,
+                    accept="text/html, application/xhtml+xml",
+                    allowed_media_types={
+                        "text/html",
+                        "application/xhtml+xml",
+                    },
                 )
-                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout + 5)
-                content = stdout.decode("utf-8", errors="replace") if stdout else ""
-                if content:
-                    return content
-            except (asyncio.TimeoutError, Exception) as e:
-                print(f"  [curl] attempt {attempt}/{retries} failed {url}: {e}", file=sys.stderr)
+                return response.body.decode("utf-8", errors="replace")
+            except (SafeHTTPError, OSError) as e:
+                print(
+                    f"  [http] attempt {attempt}/{retries} failed {url}: {e}",
+                    file=sys.stderr,
+                )
+                if isinstance(e, ResponseTooLargeError):
+                    return ""
+                try:
+                    active_budget.remaining_seconds()
+                except SafeHTTPError:
+                    return ""
         if attempt < retries:
             await asyncio.sleep(3 * attempt)  # 3s, 6s
     return ""
@@ -326,34 +388,69 @@ def extract_from_abs(html: str) -> dict:
 # PDF affiliation extraction
 # ══════════════════════════════════════════════════════════════════════════════
 
-EXTRACT_AFFILIATIONS_SCRIPT = str(
-    __import__("pathlib").Path(__file__).parent / "extract_affiliations.py"
-)
-
 async def extract_affiliations_pdf(arxiv_id: str, sem: asyncio.Semaphore,
-                                   retries: int = 3) -> list[str]:
-    """Extract affiliations from PDF via pdftotext + extract_affiliations.py."""
+                                   retries: int = 3,
+                                   *,
+                                   client: SafeHTTPClient | None = None,
+                                   budget: FetchBudget | None = None) -> list[str]:
+    """Extract affiliations through bounded HTTP and pdftotext boundaries."""
+    canonical = canonical_arxiv_id(arxiv_id)
+    if canonical is None:
+        return []
+    active_client = client or HTTP_CLIENT
+    active_budget = budget or active_client.new_budget(
+        max_total_bytes=MAX_PDF_BYTES,
+        request_timeout_seconds=HTTP_TIMEOUT,
+        run_timeout_seconds=HTTP_TIMEOUT + 5,
+    )
     for attempt in range(1, retries + 1):
         async with sem:
             try:
-                cmd = (
-                    f'curl -sL --max-time {CURL_TIMEOUT} "https://arxiv.org/pdf/{arxiv_id}"'
-                    f" | pdftotext -l 2 - -"
-                    f" | {sys.executable} {EXTRACT_AFFILIATIONS_SCRIPT}"
-                )
-                proc = await asyncio.create_subprocess_shell(
-                    cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=CURL_TIMEOUT + 15)
-                if stdout:
-                    data = json.loads(stdout.decode("utf-8", errors="replace"))
-                    affils = data.get("affiliations", [])
-                    if affils:
-                        return affils
-            except (asyncio.TimeoutError, json.JSONDecodeError, Exception) as e:
-                print(f"  [pdf] attempt {attempt}/{retries} failed {arxiv_id}: {e}", file=sys.stderr)
+                with tempfile.TemporaryDirectory(
+                    prefix="dailypaper-affiliations-",
+                    dir="/tmp",
+                ) as temporary:
+                    pdf_path = Path(temporary) / "paper.pdf"
+                    await asyncio.to_thread(
+                        active_client.fetch_file,
+                        f"https://arxiv.org/pdf/{canonical}",
+                        pdf_path,
+                        max_bytes=MAX_PDF_BYTES,
+                        budget=active_budget,
+                        accept="application/pdf",
+                        allowed_media_types={"application/pdf"},
+                    )
+                    result = await asyncio.to_thread(
+                        run_bounded_tool,
+                        [
+                            "pdftotext",
+                            "-l",
+                            "2",
+                            str(pdf_path),
+                            "-",
+                        ],
+                        timeout=15,
+                        max_stdout_bytes=MAX_PDF_TEXT_BYTES,
+                        max_stderr_bytes=MAX_TOOL_LOG_BYTES,
+                    )
+                    if result.returncode == 0 and result.stdout:
+                        affiliations = extract_affiliations(
+                            result.stdout.decode("utf-8", errors="replace")
+                        )
+                        if affiliations:
+                            return affiliations
+            except (
+                SafeProcessError,
+                SafeHTTPError,
+                OSError,
+            ) as e:
+                print(f"  [pdf] attempt {attempt}/{retries} failed {canonical}: {e}", file=sys.stderr)
+                if isinstance(e, ResponseTooLargeError):
+                    return []
+                try:
+                    active_budget.remaining_seconds()
+                except SafeHTTPError:
+                    return []
         if attempt < retries:
             await asyncio.sleep(3 * attempt)
     return []
@@ -363,24 +460,34 @@ async def extract_affiliations_pdf(arxiv_id: str, sem: asyncio.Semaphore,
 # Per-paper enrichment
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def enrich_one(paper: dict, sem: asyncio.Semaphore) -> dict:
+async def enrich_one(
+    paper: dict,
+    sem: asyncio.Semaphore,
+    *,
+    client: SafeHTTPClient | None = None,
+    budget: FetchBudget | None = None,
+) -> dict:
     """Enrich a single paper with metadata from HTML and abs pages."""
-    arxiv_id = paper.get("arxiv_id", "")
+    arxiv_id = canonical_arxiv_id(paper.get("arxiv_id", ""))
     if not arxiv_id:
-        # Try to extract from URL
-        url = paper.get("url", "")
-        m = re.search(r"(\d{4}\.\d{4,5})", url)
-        arxiv_id = m.group(1) if m else ""
+        arxiv_id = canonical_arxiv_id(paper.get("url", ""))
     if not arxiv_id:
         return paper
 
     title = paper.get("title", "")
     result = dict(paper)  # copy
+    result["paper_id"] = f"arxiv:{arxiv_id}"
+    result["arxiv_id"] = arxiv_id
 
     try:
         # Fetch HTML page
         html_url = f"https://arxiv.org/html/{arxiv_id}"
-        html = await curl_fetch(html_url, sem)
+        html = await fetch_text(
+            html_url,
+            sem,
+            client=client,
+            budget=budget,
+        )
 
         # Parse HTML if we got content
         html_authors = []
@@ -407,7 +514,12 @@ async def enrich_one(paper: dict, sem: asyncio.Semaphore) -> dict:
         abs_affiliations = []
         if not html_authors or not html_affiliations:
             abs_url = f"https://arxiv.org/abs/{arxiv_id}"
-            abs_html = await curl_fetch(abs_url, sem)
+            abs_html = await fetch_text(
+                abs_url,
+                sem,
+                client=client,
+                budget=budget,
+            )
             if abs_html:
                 abs_data = extract_from_abs(abs_html)
                 abs_authors = abs_data["authors"]
@@ -416,12 +528,17 @@ async def enrich_one(paper: dict, sem: asyncio.Semaphore) -> dict:
         # PDF fallback for affiliations if still empty
         pdf_affiliations = []
         if not html_affiliations and not abs_affiliations:
-            pdf_affiliations = await extract_affiliations_pdf(arxiv_id, sem)
+            pdf_affiliations = await extract_affiliations_pdf(
+                arxiv_id,
+                sem,
+                client=client,
+                budget=budget,
+            )
 
         # ── Merge with priority rules ──
         # Principle: new extraction > existing input, but never overwrite non-empty with empty
 
-        # figure_url: HTML curl > keep existing
+        # figure_url: HTML fetch > keep existing
         result["figure_url"] = figure_url or paper.get("figure_url", "")
 
         # affiliations: HTML > abs fallback > PDF fallback > keep existing input
@@ -457,21 +574,56 @@ async def enrich_one(paper: dict, sem: asyncio.Semaphore) -> dict:
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def enrich_all(papers: list[dict]) -> list[dict]:
-    """Enrich all papers concurrently with a semaphore limit."""
+async def enrich_all(
+    papers: list[dict],
+    *,
+    client: SafeHTTPClient | None = None,
+    budget: FetchBudget | None = None,
+) -> list[dict]:
+    """Enrich papers in bounded task batches while preserving input order."""
+    active_client = client or HTTP_CLIENT
+    active_budget = budget or active_client.new_budget(
+        max_total_bytes=MAX_TOTAL_ENRICH_BYTES,
+        request_timeout_seconds=HTTP_TIMEOUT,
+        run_timeout_seconds=ENRICH_RUN_TIMEOUT_SECONDS,
+    )
     sem = asyncio.Semaphore(SEMAPHORE_LIMIT)
-    tasks = [asyncio.create_task(enrich_one(paper, sem)) for paper in papers]
-
-    # gather preserves order and handles exceptions inline
-    raw_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    ordered = []
-    for i, result in enumerate(raw_results):
-        if isinstance(result, Exception):
-            print(f"  [error] paper #{i} ({papers[i].get('arxiv_id','')}): {result}", file=sys.stderr)
-            ordered.append(papers[i])
-        else:
-            ordered.append(result)
+    ordered: list[dict] = []
+    for offset in range(0, len(papers), SEMAPHORE_LIMIT):
+        try:
+            active_budget.remaining_seconds()
+            active_budget.ensure_available(1)
+        except SafeHTTPError as exc:
+            print(
+                f"  [http] enrichment budget exhausted: {exc}",
+                file=sys.stderr,
+            )
+            ordered.extend(papers[offset:])
+            break
+        batch = papers[offset : offset + SEMAPHORE_LIMIT]
+        raw_results = await asyncio.gather(
+            *(
+                enrich_one(
+                    paper,
+                    sem,
+                    client=active_client,
+                    budget=active_budget,
+                )
+                for paper in batch
+            ),
+            return_exceptions=True,
+        )
+        for batch_index, result in enumerate(raw_results):
+            index = offset + batch_index
+            if isinstance(result, Exception):
+                print(
+                    f"  [error] paper #{index} "
+                    f"({papers[index].get('arxiv_id','')}): {result}",
+                    file=sys.stderr,
+                )
+                ordered.append(papers[index])
+            else:
+                ordered.append(result)
 
     return ordered
 
@@ -497,45 +649,96 @@ def main():
         args.legacy_paths[1] if len(args.legacy_paths) == 2 else None
     )
 
-    input_data = (
-        input_path.read_text(encoding="utf-8", errors="replace")
-        if input_path
-        else sys.stdin.read()
-    )
-    if not input_data.strip():
-        _write_output("[]", output_path)
+    try:
+        if input_path:
+            raw = read_regular_bytes(
+                input_path,
+                max_bytes=MAX_INPUT_BYTES,
+                label="Enrichment input",
+            )
+            if raw is None:
+                raise SafeIOError(
+                    f"Enrichment input file does not exist: {input_path}"
+                )
+        else:
+            buffer = getattr(sys.stdin, "buffer", None)
+            if buffer is not None:
+                raw = buffer.read(MAX_INPUT_BYTES + 1)
+            else:
+                raw = sys.stdin.read(MAX_INPUT_BYTES + 1).encode("utf-8")
+            if len(raw) > MAX_INPUT_BYTES:
+                raise SafeIOError(
+                    f"Enrichment input exceeds the {MAX_INPUT_BYTES}-byte safety limit"
+                )
+    except SafeIOError as exc:
+        print(f"Input error: {exc}", file=sys.stderr)
+        _write_output([], output_path)
+        sys.exit(1)
+    if not raw.strip():
+        _write_output([], output_path)
         return
 
     try:
-        papers = json.loads(input_data)
-    except json.JSONDecodeError as e:
+        papers = parse_json_value(
+            raw,
+            max_bytes=MAX_INPUT_BYTES,
+            label="Enrichment input",
+        )
+    except SafeIOError as e:
         print(f"JSON parse error: {e}", file=sys.stderr)
-        _write_output("[]", output_path)
+        _write_output([], output_path)
+        sys.exit(1)
+
+    if not isinstance(papers, list):
+        print("JSON parse error: input must be an array of objects", file=sys.stderr)
+        _write_output([], output_path)
+        sys.exit(1)
+    if len(papers) > MAX_INPUT_PAPERS:
+        print(
+            f"Input error: paper count exceeds the {MAX_INPUT_PAPERS}-item limit",
+            file=sys.stderr,
+        )
+        _write_output([], output_path)
+        sys.exit(1)
+    if any(not isinstance(paper, dict) for paper in papers):
+        print("JSON parse error: input must be an array of objects", file=sys.stderr)
+        _write_output([], output_path)
         sys.exit(1)
 
     if not papers:
-        _write_output("[]", output_path)
+        _write_output([], output_path)
         return
 
     print(f"Enriching {len(papers)} papers...", file=sys.stderr)
     enriched = asyncio.run(enrich_all(papers))
     print(f"Done. Enriched {len(enriched)} papers.", file=sys.stderr)
 
-    output = json.dumps(enriched, ensure_ascii=False, indent=2) + "\n"
-
-    _write_output(output, output_path)
+    _write_output(enriched, output_path)
 
 
-def _write_output(data: str, output_path: Path | None):
-    """Write output to file (if path given) or stdout with explicit flush."""
-    if output_path:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(data, encoding="utf-8")
-    else:
+def _write_output(value: object, output_path: Path | None) -> None:
+    """Encode one bounded artifact and write it atomically or to stdout."""
+    try:
+        encoded = encode_json_value(
+            value,
+            max_bytes=MAX_OUTPUT_BYTES,
+            label="Enrichment output",
+        )
+        if output_path:
+            atomic_write_bytes(
+                output_path,
+                encoded,
+                mode=0o600,
+                label="Enrichment output",
+            )
+            return
         if hasattr(sys.stdout, "reconfigure"):
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stdout.write(data)
+        sys.stdout.write(encoded.decode("utf-8"))
         sys.stdout.flush()
+    except SafeIOError as exc:
+        print(f"Output error: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
 
 
 if __name__ == "__main__":

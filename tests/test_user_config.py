@@ -59,7 +59,7 @@ class UserConfigTests(unittest.TestCase):
                     workspace.resolve(),
                 )
 
-    def test_push_is_disabled_without_commit(self) -> None:
+    def test_push_without_commit_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "config.json"
             config_path.write_text(
@@ -74,7 +74,53 @@ class UserConfigTests(unittest.TestCase):
                 clear=False,
             ):
                 user_config.clear_config_cache()
-                self.assertFalse(user_config.git_push_enabled())
+                with self.assertRaisesRegex(
+                    user_config.config_schema.ConfigurationError,
+                    "must be enabled or disabled together",
+                ):
+                    user_config.git_push_enabled()
+
+    def test_commit_without_push_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {"automation": {"git_commit": True, "git_push": False}}
+                ),
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                {"DAILYPAPER_CONFIG": str(config_path)},
+                clear=False,
+            ):
+                user_config.clear_config_cache()
+                with self.assertRaisesRegex(
+                    user_config.config_schema.ConfigurationError,
+                    "must be enabled or disabled together",
+                ):
+                    user_config.git_commit_enabled()
+
+    def test_external_configuration_must_not_be_a_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            target = root / "target.json"
+            target.write_text("{}", encoding="utf-8")
+            link = root / "config.json"
+            link.symlink_to(target)
+            with patch.dict(
+                os.environ,
+                {"DAILYPAPER_CONFIG": str(link)},
+                clear=False,
+            ):
+                user_config.clear_config_cache()
+                with self.assertRaisesRegex(
+                    user_config.config_schema.ConfigurationError,
+                    "readable regular file",
+                ):
+                    user_config.load_user_config()
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "{}")
 
     def test_tracked_config_contains_no_personal_absolute_path(self) -> None:
         config = json.loads(

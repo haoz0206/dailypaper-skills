@@ -30,9 +30,18 @@ _SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
 if str(_SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(_SHARED_DIR))
 
+from history_store import (
+    HistoryError,
+    load_history as load_history_file,
+    save_history as save_history_file,
+)
+from safe_io import SafeIOError, parse_json_value, read_regular_bytes
 from user_config import daily_papers_dir
 
 DAYS_TO_KEEP = 30
+MAX_ENRICHED_INPUT_BYTES = 16 * 1024 * 1024
+MAX_RECOMMENDATION_INPUT_BYTES = 16 * 1024 * 1024
+MAX_INPUT_PAPERS = 100_000
 
 
 def history_file_path() -> Path:
@@ -40,23 +49,13 @@ def history_file_path() -> Path:
 
 
 def load_history(history_file: Path | None = None) -> list:
-    """Load existing history or return empty list."""
-    history_file = history_file or history_file_path()
-    if not history_file.exists():
-        return []
-    try:
-        with open(history_file, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except (json.JSONDecodeError, FileNotFoundError):
-        return []
+    """Load strict history or return empty only when the file is absent."""
+    return load_history_file(history_file or history_file_path())
 
 
 def save_history(history: list, history_file: Path | None = None):
-    """Save history to file."""
-    history_file = history_file or history_file_path()
-    history_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(history_file, 'w', encoding='utf-8') as f:
-        json.dump(history, f, ensure_ascii=False, indent=2)
+    """Atomically save validated history."""
+    save_history_file(history_file or history_file_path(), history)
 
 
 def extract_arxiv_id_from_url(url: str) -> str:
@@ -65,42 +64,84 @@ def extract_arxiv_id_from_url(url: str) -> str:
     return m.group(1) if m else ""
 
 
-def load_from_enriched(path: str) -> list:
+def _read_input(path: str | Path, *, limit: int, label: str) -> bytes:
+    try:
+        raw = read_regular_bytes(
+            Path(path),
+            max_bytes=limit,
+            label=label,
+        )
+    except SafeIOError as exc:
+        raise HistoryError(str(exc)) from exc
+    assert raw is not None
+    return raw
+
+
+def load_from_enriched(path: str | Path) -> list:
     """Load papers from enriched JSON file."""
-    with open(path, 'r', encoding='utf-8') as f:
-        papers = json.load(f)
+    raw = _read_input(
+        path,
+        limit=MAX_ENRICHED_INPUT_BYTES,
+        label="Enriched paper input",
+    )
+    try:
+        papers = parse_json_value(
+            raw,
+            max_bytes=MAX_ENRICHED_INPUT_BYTES,
+            label="Enriched paper input",
+        )
+    except SafeIOError as exc:
+        raise HistoryError(str(exc)) from exc
+    if not isinstance(papers, list):
+        raise HistoryError("Enriched paper input root must be a JSON array")
+    if len(papers) > MAX_INPUT_PAPERS:
+        raise HistoryError(
+            f"Enriched paper input exceeds the {MAX_INPUT_PAPERS}-paper safety limit"
+        )
 
     entries = []
-    for p in papers:
+    for index, p in enumerate(papers):
+        if not isinstance(p, dict):
+            raise HistoryError(f"Enriched paper {index} must be a JSON object")
         arxiv_id = p.get('arxiv_id', '')
+        if not isinstance(arxiv_id, str):
+            raise HistoryError(f"Enriched paper {index} has invalid arxiv_id")
         if not arxiv_id:
             url = p.get('url', '')
+            if not isinstance(url, str):
+                raise HistoryError(f"Enriched paper {index} has invalid url")
             arxiv_id = extract_arxiv_id_from_url(url)
 
         if arxiv_id:
+            title = p.get('title', '')
+            if not isinstance(title, str):
+                raise HistoryError(f"Enriched paper {index} has invalid title")
             entries.append({
                 'id': arxiv_id,
-                'title': p.get('title', '')[:200],
+                'title': title[:200],
                 'score': p.get('score', 0),
             })
     return entries
 
 
-def load_from_recommendation(path: str) -> list:
+def load_from_recommendation(path: str | Path) -> list:
     """Load papers from recommendation markdown file."""
-    with open(path, 'r', encoding='utf-8') as f:
-        content = f.read()
+    raw = _read_input(
+        path,
+        limit=MAX_RECOMMENDATION_INPUT_BYTES,
+        label="Recommendation input",
+    )
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HistoryError("Recommendation input is not valid UTF-8") from exc
 
     # Extract arXiv IDs from links
     arxiv_ids = re.findall(r'arxiv\.org/abs/(\d+\.\d+)', content)
-
-    # Extract paper titles (### N. Title pattern)
-    titles = {}
-    for m in re.finditer(r'^### \d+\. (.+)$', content, re.MULTILINE):
-        title = m.group(1).strip()
-        # Extract arXiv ID from nearby lines
-        idx = len(titles)
-        titles[idx] = title
+    if len(arxiv_ids) > MAX_INPUT_PAPERS:
+        raise HistoryError(
+            f"Recommendation input exceeds the {MAX_INPUT_PAPERS}-paper safety limit"
+        )
 
     entries = []
     for arxiv_id in arxiv_ids:
@@ -154,7 +195,7 @@ def update_history(
     return added
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description='Update recommendation history')
     parser.add_argument('--arxiv-ids', nargs='+', help='arXiv IDs to add')
     parser.add_argument('--from-enriched', help='Path to enriched JSON file')
@@ -164,24 +205,44 @@ def main():
 
     args = parser.parse_args()
 
-    entries = []
-
-    if args.arxiv_ids:
-        entries = [{'id': aid, 'title': ''} for aid in args.arxiv_ids]
-    elif args.from_enriched:
-        entries = load_from_enriched(args.from_enriched)
-    elif args.from_recommendation:
-        entries = load_from_recommendation(args.from_recommendation)
-    else:
+    try:
+        if args.arxiv_ids:
+            entries = [{'id': aid, 'title': ''} for aid in args.arxiv_ids]
+        elif args.from_enriched:
+            entries = load_from_enriched(args.from_enriched)
+        elif args.from_recommendation:
+            entries = load_from_recommendation(args.from_recommendation)
+        else:
+            print(
+                "Error: Must specify --arxiv-ids, --from-enriched, or --from-recommendation",
+                file=sys.stderr,
+            )
+            return 2
+        added = update_history(entries, args.date, history_file=args.history_file)
+    except (HistoryError, OSError, ValueError) as exc:
         print(
-            "Error: Must specify --arxiv-ids, --from-enriched, or --from-recommendation",
+            json.dumps(
+                {
+                    "version": 1,
+                    "status": "blocked",
+                    "code": "invalid-history",
+                    "message": str(exc),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
             file=sys.stderr,
         )
-        sys.exit(1)
-
-    added = update_history(entries, args.date, history_file=args.history_file)
-    print(f"Added {added} new entries to history")
+        return 2
+    print(
+        json.dumps(
+            {"version": 1, "status": "updated", "added": added},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import copy
-import json
 import os
 from functools import lru_cache
 from pathlib import Path
 
+import config_schema
 from machine_config import load_machine_config
+from safe_io import anchored_file_path
 
 
 DEFAULT_CONFIG = {
@@ -110,40 +111,23 @@ DEFAULT_CONFIG = {
 }
 
 
-def _deep_merge(base: dict, override: dict) -> dict:
-    for key, value in override.items():
-        if isinstance(value, dict) and isinstance(base.get(key), dict):
-            _deep_merge(base[key], value)
-        else:
-            base[key] = value
-    return base
-
-
 @lru_cache(maxsize=1)
-def load_user_config() -> dict:
-    config = copy.deepcopy(DEFAULT_CONFIG)
+def _load_user_config() -> dict:
     config_dir = Path(__file__).resolve().parent
-
-    for filename in ("user-config.json", "user-config.local.json"):
-        config_path = config_dir / filename
-        if not config_path.exists():
-            continue
-        with config_path.open("r", encoding="utf-8") as f:
-            loaded = json.load(f)
-        if isinstance(loaded, dict):
-            _deep_merge(config, loaded)
+    bundled = config_schema.load_json_object(
+        config_dir / "user-config.json",
+        label="Bundled configuration",
+    )
+    config_schema.validate_effective_config(bundled, DEFAULT_CONFIG)
+    overlays: list[dict] = []
 
     machine = load_machine_config(required=False)
-    machine_zotero = machine.get("zotero", {})
-    if isinstance(machine_zotero, dict):
-        if "database_path" in machine_zotero:
-            config["paths"]["zotero_db"] = machine_zotero["database_path"]
-        if "storage_path" in machine_zotero:
-            config["paths"]["zotero_storage"] = machine_zotero["storage_path"]
-
     external_config = os.environ.get("DAILYPAPER_CONFIG")
     if external_config:
-        config_path = Path(external_config).expanduser().resolve()
+        config_path = anchored_file_path(
+            Path(external_config),
+            label="Shared Vault configuration",
+        )
     else:
         configured_vault = _configured_vault_override(machine)
         config_path = (
@@ -152,12 +136,31 @@ def load_user_config() -> dict:
             else None
         )
     if config_path is not None and config_path.exists():
-        with config_path.open("r", encoding="utf-8") as f:
-            loaded = json.load(f)
-        if isinstance(loaded, dict):
-            _deep_merge(config, loaded)
+        overlays.append(
+            config_schema.load_json_object(
+                config_path,
+                label="Shared Vault configuration",
+            )
+        )
 
+    config = config_schema.merge_validated_overlays(
+        bundled,
+        overlays,
+        DEFAULT_CONFIG,
+    )
+    machine_zotero = machine.get("zotero", {})
+    if isinstance(machine_zotero, dict):
+        if "database_path" in machine_zotero:
+            config["paths"]["zotero_db"] = machine_zotero["database_path"]
+        if "storage_path" in machine_zotero:
+            config["paths"]["zotero_storage"] = machine_zotero["storage_path"]
+    config_schema.validate_effective_config(config, DEFAULT_CONFIG)
     return config
+
+
+def load_user_config() -> dict:
+    """Return an isolated copy of the validated effective configuration."""
+    return copy.deepcopy(_load_user_config())
 
 
 def _configured_vault_override(
@@ -203,11 +206,7 @@ def daily_papers_config() -> dict:
 
 
 def automation_config() -> dict:
-    config = load_user_config()["automation"]
-    if config.get("git_push") and not config.get("git_commit"):
-        config = copy.deepcopy(config)
-        config["git_push"] = False
-    return config
+    return load_user_config()["automation"]
 
 
 def repository_config() -> dict:
@@ -228,7 +227,10 @@ def obsidian_vault_path() -> Path:
 def shared_config_path() -> Path:
     explicit = os.environ.get("DAILYPAPER_CONFIG")
     if explicit:
-        return Path(explicit).expanduser().resolve()
+        return anchored_file_path(
+            Path(explicit),
+            label="Shared Vault configuration",
+        )
     return obsidian_vault_path() / ".dailypaper" / "config.json"
 
 
@@ -262,7 +264,7 @@ def timezone_name() -> str:
 
 def clear_config_cache() -> None:
     """Clear cached configuration after tests or environment changes."""
-    load_user_config.cache_clear()
+    _load_user_config.cache_clear()
 
 
 def auto_refresh_indexes_enabled() -> bool:

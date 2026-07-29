@@ -1,6 +1,10 @@
 ---
 title: "{Title}"
 method_name: "{MethodName}"
+paper_id: "{PaperId}"  # 必填：arxiv:/doi:/sha256:/zotero: 命名空间
+source_url: "{SourceUrl}"
+# 按来源保留适用字段并删除不适用字段：arxiv_id / doi /
+# local_pdf_sha256 / zotero_key / zotero_library_id
 authors: [{Authors}]
 year: {Year}
 venue: {Venue}

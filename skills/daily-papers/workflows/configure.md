@@ -16,7 +16,8 @@
 
 使用公开 `SKILL.md` 已解析的绝对路径 `SKILL_ROOT`；配置脚本路径为
 `{SKILL_ROOT}/scripts/configure/config_manager.py`。
-本机配置脚本为 `{SKILL_ROOT}/scripts/shared/machine_config.py`。确认它、
+本机 onboarding 入口为 `{SKILL_ROOT}/scripts/configure/onboard.py`，配置查看入口为
+`{SKILL_ROOT}/scripts/shared/machine_config.py`。确认它们、
 `{SKILL_ROOT}/scripts/shared/user_config.py` 和
 `{SKILL_ROOT}/scripts/shared/vault_coordination.py` 存在；缺失时说明安装的不是完整
 Skill 并停止，不得临时复制或猜测默认配置。
@@ -43,38 +44,27 @@ python3 "{SKILL_ROOT}/scripts/shared/machine_config.py" show
 固定 Vault 远程为 `git@github.com:haoz0206/dailypaper-vault.git`，分支为 `main`。
 
 只有本机尚未配置、配置损坏、用户明确更换 Vault，或已配置路径无法通过验证时，
-才执行 onboarding：
-
-- 候选路径不存在：用户已明确要求配置或初始化时，创建父目录并运行：
-
-  ```bash
-  git clone --branch main --single-branch \
-    git@github.com:haoz0206/dailypaper-vault.git "{VAULT_PATH}"
-  ```
-- 候选路径存在：要求它是 Git 根目录，`origin` 精确匹配固定远程，分支为 `main`。
-- 路径存在但不是正确 Vault：停止，不得覆盖、删除或在其中初始化另一个仓库。
-
-onboarding 时幂等运行：
+才调用一次确定性 onboarding：
 
 ```bash
-python3 "{SKILL_ROOT}/scripts/shared/vault_coordination.py" bootstrap \
-  --vault "{VAULT_PATH}"
-
-python3 "{SKILL_ROOT}/scripts/shared/machine_config.py" set \
+python3 "{SKILL_ROOT}/scripts/configure/onboard.py" \
   --vault "{VAULT_PATH}"
 ```
 
-只有 clone/验证和 bootstrap 成功后才能写本机配置。该文件供 Claude Code、Codex
-和其他 Harness 共用，不提交到 Skills 仓库或 Vault。Zotero 路径只有用户明确要求
-时才追加 `--zotero-db`、`--zotero-storage`。
+入口会把不存在的目标 clone 到唯一同级临时目录，成功后才 rename；已有目标必须是
+固定远程和 `main` 分支的 Git 根目录。它随后完成可恢复 bootstrap，并且只有
+bootstrap 成功后才原子写入和回读验证本机配置。路径错误、clone 失败或已有目录
+不匹配时停止，不覆盖或删除用户目录。该机器文件供 Claude Code、Codex 和其他
+Harness 共用，不提交到 Skills 仓库或 Vault。Zotero 路径只有用户明确要求时才在
+同一命令追加 `--zotero-db`、`--zotero-storage`。
 
 本机已经有效配置且用户只查看或修改共享研究配置时，只验证 Vault，不重复执行
 bootstrap 或 `machine_config.py set`。这样纯查看不会创建文件或 Git 提交。
 用户只修改 Zotero 路径时，验证现有 Vault 后使用现有 `--vault` 调用 `set`，无需
 bootstrap。
 
-发生本机配置写入后运行 `machine_config.py validate`，并确认解析出的 Vault 与候选
-路径一致。
+onboarding 成功 JSON 已包含回读验证后的 `config`，不要再重复运行
+`machine_config.py validate`。
 后续运行不再要求持久化 `DAILYPAPER_VAULT` 或 `DAILYPAPER_CONFIG`；显式环境变量
 仍可作为临时覆盖。
 
@@ -87,26 +77,23 @@ bootstrap。
 - “配置、修改、调整”：更新现有共享配置并发布。
 - “初始化配置”：由 Step 1 完成；bootstrap 非零退出时停止。
 
-## Step 3：同步并检查并发状态
+## Step 3：准备最新配置快照
 
-任何更新前必须：
+不要由 prompt 手工执行 Git。统一运行：
 
-1. 验证 `VAULT_PATH` 是 Git 根目录、当前分支为 `main`，且
-   `origin` 为配置约定的固定 Vault 远程。
-2. 要求工作树干净。
-3. 执行 `git pull --ff-only origin main`。
-4. 运行：
+```bash
+python3 "{SKILL_ROOT}/scripts/configure/config_manager.py" \
+  --vault "{VAULT_PATH}" prepare
+```
 
-   ```bash
-   python3 "{SKILL_ROOT}/scripts/configure/config_manager.py" \
-     --vault "{VAULT_PATH}" guard
-   ```
+`prepare` 会验证固定远程和分支，并在共享 Vault writer lock 下 fetch；干净且落后的
+clone 只做 fast-forward。工作树不干净且 HEAD 已是远程最新时，只读查看可以继续，
+但必须明确说明结果不是干净快照；更新会由 `apply` 拒绝。工作树不干净且落后或
+分叉时停止，不得自动 rebase 或覆盖。
 
-如果远程任务状态是 `running`，立即停止。不得修改、删除、过期或接管任务状态，
-也不得通过改配置让正在运行的日报失效。
-
-只读查看也应先 `pull --ff-only`；工作树不干净时可以读取当前配置，但必须明确说明
-结果不是已同步快照，且不得写入。
+`apply` 会在真正写入前再次 fresh-fetch 并检查远程任务状态。如果远程日报是
+`running`，立即停止；不得修改、删除、过期或接管任务状态，也不得通过改配置让
+正在运行的日报失效。
 
 ## Step 4：理解当前配置
 
@@ -115,10 +102,9 @@ bootstrap。
 ```bash
 python3 "{SKILL_ROOT}/scripts/configure/config_manager.py" \
   --vault "{VAULT_PATH}" show
-
-python3 "{SKILL_ROOT}/scripts/configure/config_manager.py" \
-  --vault "{VAULT_PATH}" validate
 ```
+
+`show` 会先执行完整配置校验再输出有效配置；不得紧接着重复运行 `validate`。
 
 解释配置时区分：
 
@@ -130,6 +116,10 @@ python3 "{SKILL_ROOT}/scripts/configure/config_manager.py" \
 - `min_score`：最终候选最低分。
 - `top_n`：每天保留数量；当前多日调用会乘以天数。
 - `auto_refresh_indexes`：写入后是否刷新 Obsidian MOC。
+- `git_commit` / `git_push`：共同控制独立调用 `paper-reader` /
+  `generate-mocs` 是否通过可恢复发布事务精确提交并普通 push；不影响协调式
+  日报发布。固定远程协调模式不允许只 commit 不 push，两者必须同时启用或同时
+  关闭，默认均为 `false`。
 
 当前不支持的请求必须如实报告，禁止写入不会生效的字段。包括：
 
@@ -156,13 +146,15 @@ python3 "{SKILL_ROOT}/scripts/configure/config_manager.py" \
     "top_n": 15
   },
   "automation": {
-    "auto_refresh_indexes": true
+    "auto_refresh_indexes": true,
+    "git_commit": false,
+    "git_push": false
   }
 }
 ```
 
 patch 只包含用户要求修改的字段。所有关键词使用小写；数组顺序表达用户优先顺序。
-将 patch 写入本次唯一的临时文件，不使用共享固定文件名。
+将 patch 写入 **Vault 之外**的本次唯一临时文件，不使用共享固定文件名。
 
 先运行只读预览：
 
@@ -181,23 +173,29 @@ python3 "{SKILL_ROOT}/scripts/configure/config_manager.py" \
 ```bash
 python3 "{SKILL_ROOT}/scripts/configure/config_manager.py" \
   --vault "{VAULT_PATH}" apply --patch "{PATCH_PATH}"
-
-python3 "{SKILL_ROOT}/scripts/configure/config_manager.py" \
-  --vault "{VAULT_PATH}" validate
 ```
 
-`apply` 会在原子替换 `.dailypaper/config.json` 的最后一刻再次读取任务状态；即使
-`plan` 之后有日报任务抢先取得所有权，也必须拒绝写入。不得绕过这道脚本内检查。
+`apply` 是完整的可恢复发布事务，而不是仅写工作树：它持有与日报和 standalone
+共用的 Vault writer lock，重新 fast-forward、fresh-fetch 远程任务状态，重建并
+验证 plan，然后先持久化事务 journal，再原子替换配置、精确暂存唯一配置路径、
+创建确定性 commit、普通 push 并复核远程 HEAD。即使 `plan` 之后有其他机器的日报
+抢先取得所有权，也会在写入前拒绝。
 
-然后：
+Harness 不得自行运行 `git add`、commit、push、rebase 或 force push。网络失败、
+异常中断或 push 回包丢失时，保留的事务和 commit 由同一个 `apply --patch` 命令
+恢复；必须使用原 patch 重试，不要创建第二个配置提交。如果机器重启后临时 patch
+已经丢失，直接运行：
 
-1. 确认只有 `.dailypaper/config.json` 被修改。
-2. 只暂存该文件，禁止 `git add -A`。
-3. commit message 使用 `configure daily papers`。
-4. 普通 push 到 `origin main`。
-5. push 失败时保留本地提交并停止；不得自动 rebase、force push 或覆盖远程配置。
+```bash
+python3 "{SKILL_ROOT}/scripts/configure/config_manager.py" \
+  --vault "{VAULT_PATH}" resume
+```
 
-结束时报告配置路径、变化摘要、commit/push 结果。删除临时 patch。
+`resume` 只使用 Git-dir 中经过严格校验的 journal，不要求重新猜测用户配置意图。
+成功响应为 `published`，响应丢失后的相同重试为 `already-published`；另一台机器
+已经应用相同配置时返回 `unchanged`，不创建空 commit。
+
+结束时报告配置路径、实际变化摘要、commit 和远程 HEAD；成功后删除临时 patch。
 
 ## 配置原则
 

@@ -1,11 +1,6 @@
-# Personal Zotero collection mapping (AI auto-generated)
-skills/daily-papers/scripts/paper-reader/collection_mapping.json
-skills/*/scripts/shared/user-config.local.json
-.agents/skills/daily-papers/scripts/shared/user-config.local.json
-.claude/skills/daily-papers/scripts/shared/user-config.local.json
-
 # Per-run state (never commit generated intermediate artifacts)
 .dailypaper/runs/
+.codegraph/
 
 # Python cache
 __pycache__/

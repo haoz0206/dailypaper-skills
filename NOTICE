@@ -1,0 +1,19 @@
+DailyPaper Skills
+
+This repository is a derivative work based on:
+
+  dailypaper-skills by huangkiki and contributors
+  https://github.com/huangkiki/dailypaper-skills
+
+The original project introduced the Claude Code workflow for discovering,
+reviewing, reading, and organizing academic papers in an Obsidian Vault.
+
+This repository retains the original Git history and includes substantial
+subsequent modifications by zhonghao and contributors, including portable
+Claude Code and Codex packaging, resumable cross-machine Vault coordination,
+configuration onboarding, deterministic lifecycle contracts, and hardened
+runtime boundaries.
+
+This derivative is not an official release of the upstream project.
+The original work and these modifications are distributed under the Apache
+License, Version 2.0. See LICENSE for the full terms.

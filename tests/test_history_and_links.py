@@ -37,7 +37,6 @@ class HistoryAndLinksTests(unittest.TestCase):
                 json.dumps(
                     {
                         "paths": {
-                            "obsidian_vault": str(root),
                             "daily_papers_folder": "ResearchDigest",
                         }
                     }
@@ -46,7 +45,10 @@ class HistoryAndLinksTests(unittest.TestCase):
             )
             with patch.dict(
                 os.environ,
-                {"DAILYPAPER_CONFIG": str(config_path)},
+                {
+                    "DAILYPAPER_CONFIG": str(config_path),
+                    "DAILYPAPER_VAULT": str(root),
+                },
                 clear=False,
             ):
                 user_config.clear_config_cache()
@@ -68,6 +70,71 @@ class HistoryAndLinksTests(unittest.TestCase):
             self.assertTrue(history_path.exists())
             history = json.loads(history_path.read_text(encoding="utf-8"))
             self.assertEqual(history[0]["id"], "2607.00001")
+
+    def test_history_inputs_are_bounded_regular_files_with_strict_shapes(self) -> None:
+        module = load_module(
+            "update_history_boundaries_under_test",
+            REPO_ROOT
+            / "skills"
+            / "daily-papers"
+            / "scripts"
+            / "review"
+            / "update_history.py",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            oversized = root / "oversized.json"
+            oversized.write_bytes(b"[" + b" " * 64 + b"]")
+            with (
+                patch.object(module, "MAX_ENRICHED_INPUT_BYTES", 16),
+                self.assertRaisesRegex(module.HistoryError, "safety limit"),
+            ):
+                module.load_from_enriched(oversized)
+
+            outside = root / "outside.json"
+            outside.write_text("[]", encoding="utf-8")
+            linked = root / "linked.json"
+            linked.symlink_to(outside)
+            with self.assertRaisesRegex(module.HistoryError, "regular file"):
+                module.load_from_enriched(linked)
+
+            malformed = root / "malformed.json"
+            malformed.write_text('[{"arxiv_id": 42}]', encoding="utf-8")
+            with self.assertRaisesRegex(module.HistoryError, "invalid arxiv_id"):
+                module.load_from_enriched(malformed)
+
+    def test_recommendation_input_rejects_invalid_utf8_and_excess_papers(self) -> None:
+        module = load_module(
+            "update_history_recommendation_under_test",
+            REPO_ROOT
+            / "skills"
+            / "daily-papers"
+            / "scripts"
+            / "review"
+            / "update_history.py",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            invalid = root / "invalid.md"
+            invalid.write_bytes(b"\xff")
+            with self.assertRaisesRegex(module.HistoryError, "valid UTF-8"):
+                module.load_from_recommendation(invalid)
+
+            recommendation = root / "many.md"
+            recommendation.write_text(
+                "\n".join(
+                    [
+                        "https://arxiv.org/abs/2607.00001",
+                        "https://arxiv.org/abs/2607.00002",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch.object(module, "MAX_INPUT_PAPERS", 1),
+                self.assertRaisesRegex(module.HistoryError, "paper safety limit"),
+            ):
+                module.load_from_recommendation(recommendation)
 
     def test_backfill_scan_honors_notes_dir_and_concepts_dir(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -101,7 +168,161 @@ class HistoryAndLinksTests(unittest.TestCase):
                     concepts_path=concepts,
                 )
 
-            self.assertEqual(set(index), {"paper"})
+            self.assertEqual([record.stem for record in index.records], ["Paper"])
+
+    def test_backfill_uses_exact_identity_and_refuses_ambiguous_name_match(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            notes = root / "论文笔记"
+            first = notes / "A" / "Shared.md"
+            second = notes / "B" / "Shared.md"
+            first.parent.mkdir(parents=True)
+            second.parent.mkdir(parents=True)
+            first.write_text(
+                "\n".join(
+                    [
+                        "---",
+                        'title: "First"',
+                        'method_name: "Shared"',
+                        'paper_id: "arxiv:2607.00001"',
+                        "---",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            second.write_text(
+                "\n".join(
+                    [
+                        "---",
+                        'title: "Second"',
+                        'method_name: "Shared"',
+                        'paper_id: "arxiv:2607.00002"',
+                        "---",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            recommendation = root / "DailyPapers" / "today.md"
+            recommendation.parent.mkdir()
+            recommendation.write_text(
+                "\n".join(
+                    [
+                        "## 分流表",
+                        "",
+                        "| 等级 | 论文 |",
+                        "|---|---|",
+                        "| 必读 | [[Shared]] |",
+                        "",
+                        "## 论文点评",
+                        "",
+                        "### 1. Shared: Exact",
+                        "- **链接**: [arXiv](https://arxiv.org/abs/2607.00002v2)",
+                        "- **来源**: 📄 arXiv 关键词检索",
+                        "",
+                        "### 2. Shared: No identity",
+                        "- **来源**: Local",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {"DAILYPAPER_VAULT": str(root)},
+                clear=False,
+            ):
+                user_config.clear_config_cache()
+                module = load_module(
+                    "backfill_links_identity_under_test",
+                    REPO_ROOT
+                    / "skills"
+                    / "daily-papers"
+                    / "scripts"
+                    / "notes"
+                    / "backfill_links.py",
+                )
+                index = module.scan_notes(notes_dir=notes)
+                count = module.backfill_links(recommendation, index)
+
+            content = recommendation.read_text(encoding="utf-8")
+            self.assertEqual(count, 1)
+            self.assertIn(
+                "[[论文笔记/B/Shared]]",
+                content,
+            )
+            self.assertEqual(content.count("- 📒 **笔记**:"), 1)
+
+    def test_diversion_table_replaces_duplicate_method_links_in_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            notes = root / "论文笔记"
+            for topic, paper_id in (("A", "2607.00001"), ("B", "2607.00002")):
+                note = notes / topic / "Shared.md"
+                note.parent.mkdir(parents=True)
+                note.write_text(
+                    "\n".join(
+                        [
+                            "---",
+                            f'title: "{topic}"',
+                            'method_name: "Shared"',
+                            f'paper_id: "arxiv:{paper_id}"',
+                            "---",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+            recommendation = root / "DailyPapers" / "today.md"
+            recommendation.parent.mkdir()
+            recommendation.write_text(
+                "\n".join(
+                    [
+                        "## 分流表",
+                        "",
+                        "| 等级 | 论文 |",
+                        "|---|---|",
+                        "| 必读 | [[Shared]] · [[Shared]] |",
+                        "",
+                        "## 论文点评",
+                        "",
+                        "### 1. Shared: First",
+                        "- **链接**: [arXiv](https://arxiv.org/abs/2607.00001)",
+                        "- **来源**: 📄 arXiv",
+                        "",
+                        "### 2. Shared: Second",
+                        "- **链接**: [arXiv](https://arxiv.org/abs/2607.00002)",
+                        "- **来源**: 📄 arXiv",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {"DAILYPAPER_VAULT": str(root)},
+                clear=False,
+            ):
+                user_config.clear_config_cache()
+                module = load_module(
+                    "backfill_links_order_under_test",
+                    REPO_ROOT
+                    / "skills"
+                    / "daily-papers"
+                    / "scripts"
+                    / "notes"
+                    / "backfill_links.py",
+                )
+                count = module.backfill_links(
+                    recommendation,
+                    module.scan_notes(notes_dir=notes),
+                )
+
+            content = recommendation.read_text(encoding="utf-8")
+            self.assertEqual(count, 2)
+            table = content.split("## 论文点评", 1)[0]
+            self.assertIn("[[论文笔记/A/Shared]]", table)
+            self.assertIn("[[论文笔记/B/Shared]]", table)
 
 
 if __name__ == "__main__":

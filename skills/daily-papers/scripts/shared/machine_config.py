@@ -7,12 +7,14 @@ import argparse
 import json
 import os
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
+from safe_io import SafeIOError, atomic_write_json, load_json_object
+
 
 SCHEMA_VERSION = 1
+MAX_MACHINE_CONFIG_BYTES = 1024 * 1024
 MACHINE_CONFIG_ENV = "DAILYPAPER_MACHINE_CONFIG"
 ALLOWED_TOP_LEVEL_FIELDS = {"version", "vault_path", "zotero"}
 ALLOWED_ZOTERO_FIELDS = {"database_path", "storage_path"}
@@ -25,10 +27,17 @@ class MachineConfigError(ValueError):
 def machine_config_path() -> Path:
     explicit = os.environ.get(MACHINE_CONFIG_ENV)
     if explicit:
-        return Path(explicit).expanduser().resolve()
+        candidate = Path(explicit).expanduser()
+        if not candidate.is_absolute():
+            raise MachineConfigError(
+                f"{MACHINE_CONFIG_ENV} must be an absolute path"
+            )
+        return candidate
     xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
     if xdg_config_home:
-        base = Path(xdg_config_home).expanduser().resolve()
+        base = Path(xdg_config_home).expanduser()
+        if not base.is_absolute():
+            raise MachineConfigError("XDG_CONFIG_HOME must be an absolute path")
     else:
         base = Path.home() / ".config"
     return base / "dailypaper" / "config.json"
@@ -52,7 +61,12 @@ def normalize_machine_config(value: Any) -> dict[str, Any]:
             "Unsupported machine configuration fields: "
             + ", ".join(sorted(unknown))
         )
-    if value.get("version") != SCHEMA_VERSION:
+    version = value.get("version")
+    if (
+        isinstance(version, bool)
+        or not isinstance(version, int)
+        or version != SCHEMA_VERSION
+    ):
         raise MachineConfigError(
             f"Machine configuration version must be {SCHEMA_VERSION}"
         )
@@ -88,42 +102,41 @@ def normalize_machine_config(value: Any) -> dict[str, Any]:
 
 def load_machine_config(*, required: bool = False) -> dict[str, Any]:
     path = machine_config_path()
-    if not path.exists():
-        if required:
-            raise MachineConfigError(
-                f"Machine configuration does not exist: {path}"
-            )
-        return {}
+    if path.is_symlink():
+        raise MachineConfigError(
+            f"Machine configuration must not be a symbolic link: {path}"
+        )
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise MachineConfigError(f"Invalid JSON in {path}: {exc}") from exc
+        value = load_json_object(
+            path,
+            max_bytes=MAX_MACHINE_CONFIG_BYTES,
+            required=required,
+            label="Machine configuration",
+        )
+    except SafeIOError as exc:
+        raise MachineConfigError(str(exc)) from exc
+    if value is None:
+        return {}
     return normalize_machine_config(value)
 
 
 def write_machine_config(value: dict[str, Any]) -> dict[str, Any]:
     normalized = normalize_machine_config(value)
     path = machine_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path: Path | None = None
+    if path.is_symlink():
+        raise MachineConfigError(
+            f"Machine configuration must not be a symbolic link: {path}"
+        )
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=".config.",
-            suffix=".tmp",
-            delete=False,
-        ) as temporary:
-            json.dump(normalized, temporary, ensure_ascii=False, indent=2)
-            temporary.write("\n")
-            temporary.flush()
-            os.fsync(temporary.fileno())
-            temporary_path = Path(temporary.name)
-        temporary_path.replace(path)
-    finally:
-        if temporary_path is not None and temporary_path.exists():
-            temporary_path.unlink()
+        atomic_write_json(
+            path,
+            normalized,
+            max_bytes=MAX_MACHINE_CONFIG_BYTES,
+            mode=0o600,
+            label="Machine configuration",
+        )
+    except SafeIOError as exc:
+        raise MachineConfigError(str(exc)) from exc
     return normalized
 
 
@@ -207,7 +220,19 @@ def main() -> int:
                 }
             )
     except (MachineConfigError, OSError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        print(
+            json.dumps(
+                {
+                    "version": SCHEMA_VERSION,
+                    "status": "blocked",
+                    "code": "invalid-machine-config",
+                    "message": str(exc),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
         return 2
     return 0
 

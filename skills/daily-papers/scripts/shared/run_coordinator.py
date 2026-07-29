@@ -11,34 +11,49 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
-import sys
-import time
 from collections.abc import Iterable
 from datetime import datetime
+from itertools import islice
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import run_guardian
+import runtime_context
+import stage_report
 import vault_coordination
 from run_lifecycle import (
     DAILY_WORKFLOW_CONTRACT,
+    MAX_MANIFEST_BYTES,
     ArtifactCandidate,
     Interruption,
     LifecycleError,
     RunLifecycle,
     RunSnapshot,
 )
-from user_config import obsidian_vault_path, repository_config, timezone_name
+from safe_io import (
+    DocumentTooLargeError,
+    SafeIOError,
+    anchored_file_path,
+    atomic_write_bytes,
+    encode_json_value,
+    inspect_regular_file,
+    load_json_object,
+    parse_json_object,
+    read_regular_bytes,
+)
+
+
+MAX_PENDING_STAGE_REPORTS = 1024
 
 
 WORKFLOW_CONTRACT = DAILY_WORKFLOW_CONTRACT
-DEFAULT_GUARDIAN_IDLE_TIMEOUT = 3600.0
-GUARDIAN_READY_TIMEOUT = 5.0
+DEFAULT_GUARDIAN_IDLE_TIMEOUT: float | None = None
 REMOTE_RUNNING = frozenset({"running"})
 REMOTE_PUBLISHED = frozenset({"success", "published"})
+MAX_PROPOSAL_BYTES = 1024 * 1024
+MAX_RUNTIME_CONTEXT_BYTES = 1024 * 1024
 
 
 class CoordinatorError(RuntimeError):
@@ -49,36 +64,184 @@ class CoordinatorError(RuntimeError):
         self.code = code
 
 
-def _configuration_fingerprint() -> str:
-    public = getattr(vault_coordination, "configuration_fingerprint", None)
-    return str(public() if public is not None else vault_coordination._config_fingerprint())
+def _validated_runtime() -> dict[str, Any]:
+    """Resolve the strict runtime contract at every coordinator mutation boundary."""
+    try:
+        return runtime_context.resolve_runtime_context()
+    except (RuntimeError, ValueError, OSError, json.JSONDecodeError) as exc:
+        raise CoordinatorError("invalid-runtime-context", str(exc)) from exc
+
+
+def _configured_vault() -> Path:
+    """Resolve onboarding state without requiring an initialized shared config."""
+    try:
+        return runtime_context.resolve_vault_path()
+    except (RuntimeError, ValueError, OSError, json.JSONDecodeError) as exc:
+        raise CoordinatorError("invalid-machine-context", str(exc)) from exc
+
+
+def _context_for_vault(vault: Path) -> dict[str, Any]:
+    context = _validated_runtime()
+    resolved = Path(str(context["paths"]["vault"])).expanduser().resolve()
+    if resolved != vault:
+        raise CoordinatorError(
+            "vault-context-changed",
+            f"Runtime Vault changed from {vault} to {resolved}.",
+        )
+    return context
+
+
+def _bootstrap_vault(vault: Path) -> dict[str, Any]:
+    result = vault_coordination.bootstrap_vault(vault)
+    if result.get("status") not in {"bootstrapped", "already-bootstrapped"}:
+        raise CoordinatorError(
+            "bootstrap-failed",
+            f"Unexpected Vault bootstrap result: {result.get('status')}",
+        )
+    return dict(result)
+
+
+def _prepare_start_runtime(
+    target_date: str | None,
+) -> tuple[
+    dict[str, Any] | None,
+    Path,
+    str,
+    dict[str, Any],
+    dict[str, Any],
+]:
+    """Prepare one safe start context without destroying resumable dirty artifacts."""
+    vault = _configured_vault()
+    date = _target_date(target_date, vault_coordination.FIXED_TIMEZONE)
+    inspected = _remote_inspection(vault)
+    state = inspected["task_state"]
+    run_id = str(state.get("run_id") or "") if state else ""
+    local_manifest = _manifest_path(vault, run_id) if run_id else None
+
+    # Remote ownership is authoritative and can be inspected using only the
+    # immutable repository endpoint. Cross-machine recovery must not be hidden
+    # by a missing or stale local shared configuration.
+    if state and state.get("status") in REMOTE_RUNNING:
+        if (
+            local_manifest is None
+            or not local_manifest.parent.is_dir()
+            or not local_manifest.exists()
+        ):
+            return (
+                None,
+                vault,
+                date,
+                inspected,
+                {
+                    "status": "preserved-for-cross-machine-recovery",
+                    "vault": str(vault),
+                    "run_id": run_id,
+                    "local_manifest_missing": (
+                        local_manifest is not None
+                        and local_manifest.parent.is_dir()
+                        and not local_manifest.exists()
+                    ),
+                },
+            )
+        context = _context_for_vault(vault)
+        date = _target_date(target_date, str(context["runtime"]["timezone"]))
+        return (
+            context,
+            vault,
+            date,
+            inspected,
+            {
+                "status": "preserved-for-recovery",
+                "vault": str(vault),
+                "run_id": run_id,
+            },
+        )
+
+    if (
+        state
+        and state.get("status") in REMOTE_PUBLISHED
+        and state.get("target_date") == date
+    ):
+        context = (
+            _context_for_vault(vault)
+            if local_manifest is not None and local_manifest.exists()
+            else None
+        )
+        return (
+            context,
+            vault,
+            date,
+            inspected,
+            {
+                "status": "preserved-published-state",
+                "vault": str(vault),
+                "run_id": run_id,
+            },
+        )
+
+    try:
+        config_path = runtime_context.resolve_shared_config_path(vault)
+    except (RuntimeError, ValueError, OSError, json.JSONDecodeError) as exc:
+        raise CoordinatorError("invalid-runtime-context", str(exc)) from exc
+
+    if not config_path.is_file():
+        if os.environ.get("DAILYPAPER_CONFIG"):
+            # An explicit source is authoritative; never silently replace it by
+            # bootstrapping a different Vault-local configuration.
+            _validated_runtime()
+            raise AssertionError("unreachable")
+        preparation = _bootstrap_vault(vault)
+        context = _context_for_vault(vault)
+        date = _target_date(target_date, str(context["runtime"]["timezone"]))
+        return (
+            context,
+            vault,
+            date,
+            _remote_inspection(vault),
+            preparation,
+        )
+
+    preparation = _bootstrap_vault(vault)
+    # Bootstrap may fast-forward a new shared configuration. Re-resolve every
+    # derived path and fingerprint, then re-fetch state to close the race
+    # between the first inspection and synchronization.
+    context = _context_for_vault(vault)
+    date = _target_date(target_date, str(context["runtime"]["timezone"]))
+    inspected = _remote_inspection(vault)
+    return context, vault, date, inspected, preparation
 
 
 def _dirty_paths(vault: Path) -> set[str]:
-    public = getattr(vault_coordination, "dirty_paths", None)
-    values = public(vault) if public is not None else vault_coordination._dirty_paths(vault)
-    return {str(value) for value in values}
+    return {str(value) for value in vault_coordination.dirty_paths(vault)}
 
 
-def _inspect_task_state(vault: Path) -> dict[str, Any] | None:
-    """Read current remote-backed task state, with legacy private compatibility."""
-    public = getattr(vault_coordination, "inspect_task_state", None)
-    if public is not None:
-        result = public(vault)
-        if result is None:
-            return None
-        if isinstance(result, dict) and "task_state" in result:
-            state = result["task_state"]
-            return state if isinstance(state, dict) else None
-        if isinstance(result, dict) and "state" in result:
-            state = result["state"]
-            return state if isinstance(state, dict) else None
-        return result if isinstance(result, dict) else None
+def _inspect_task_state(
+    vault: Path,
+    *,
+    snapshot: bool = False,
+) -> dict[str, Any] | None:
+    """Read the one public remote-backed Task State snapshot."""
+    result = vault_coordination.inspect_task_state(vault)
+    if snapshot:
+        return dict(result)
+    state = result.get("task_state")
+    return dict(state) if isinstance(state, dict) else None
 
-    config, remote = vault_coordination._repository_identity(vault)
-    vault_coordination._sync_before_run(vault, config, remote)
-    task_path = vault / vault_coordination._task_relative_path()
-    return vault_coordination._read_state(task_path)
+
+def _remote_inspection(vault: Path) -> dict[str, Any]:
+    """Normalize production snapshots and lightweight test/legacy state readers."""
+    value = _inspect_task_state(vault, snapshot=True)
+    if isinstance(value, dict) and "task_state" in value:
+        return value
+    state = value if isinstance(value, dict) else None
+    return {
+        "status": "inspected",
+        "vault": str(vault),
+        "remote": vault_coordination.FIXED_REMOTE,
+        "branch": vault_coordination.FIXED_BRANCH,
+        "remote_head": None,
+        "task_state": state,
+    }
 
 
 def _prepare_cancel(
@@ -86,46 +249,31 @@ def _prepare_cancel(
     *,
     expected_run_id: str,
 ) -> dict[str, Any]:
-    public = getattr(vault_coordination, "prepare_cancel", None)
-    if public is not None:
-        return dict(public(vault, expected_run_id=expected_run_id))
-    state = _inspect_task_state(vault)
-    if (
-        not state
-        or state.get("status") != "running"
-        or state.get("run_id") != expected_run_id
-    ):
-        raise CoordinatorError(
-            "stale-cancellation",
-            "Vault Task State changed before cancellation could be proposed.",
+    return dict(
+        vault_coordination.prepare_cancel(
+            vault,
+            expected_run_id=expected_run_id,
         )
-    return {
-        "version": 1,
-        "task": state.get("task", "daily-papers"),
-        "run_id": expected_run_id,
-        "target_date": state.get("target_date"),
-        "harness": state.get("harness"),
-        "owner": state.get("owner"),
-        "started_at": state.get("started_at"),
-        "updated_at": state.get("updated_at"),
-        "vault": str(vault),
-    }
+    )
 
 
 def _cancel_vault(proposal: dict[str, Any]) -> dict[str, Any]:
-    public = getattr(vault_coordination, "cancel", None)
-    if public is None:
-        raise CoordinatorError(
-            "cancel-unavailable",
-            "This vault_coordination version does not support CAS cancellation.",
-        )
-    return dict(public(proposal))
+    return dict(vault_coordination.cancel(proposal))
 
 
 def _target_date(value: str | None, timezone: str) -> str:
     if value:
         return datetime.strptime(value, "%Y-%m-%d").date().isoformat()
     return datetime.now(ZoneInfo(timezone)).date().isoformat()
+
+
+def _window_days(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 31:
+        raise CoordinatorError(
+            "invalid-window-days",
+            "window_days must be an integer from 1 to 31.",
+        )
+    return value
 
 
 def _run_root(vault: Path) -> Path:
@@ -144,12 +292,70 @@ def _manifest_path(vault: Path, run_id: str) -> Path:
 def _snapshot_fields(snapshot: RunSnapshot) -> dict[str, Any]:
     return {
         "run_id": snapshot.run_id,
+        "window_days": snapshot.window_days,
         "manifest": str(snapshot.manifest_path),
         "phase": snapshot.phase,
         "condition": snapshot.condition,
         "outcome": snapshot.outcome,
         "revision": snapshot.revision,
     }
+
+
+def _freeze_runtime_context(
+    manifest: Path,
+    context: dict[str, Any],
+) -> Path:
+    """Persist the one immutable context consumed by every stage process."""
+    target = manifest.parent / "runtime-context.json"
+    try:
+        encoded = encode_json_value(
+            context,
+            max_bytes=MAX_RUNTIME_CONTEXT_BYTES,
+            label="Frozen runtime context",
+        )
+    except DocumentTooLargeError as exc:
+        raise CoordinatorError(
+            "runtime-context-conflict",
+            "Frozen runtime context exceeds the 1 MiB safety limit.",
+        ) from exc
+    except SafeIOError as exc:
+        raise CoordinatorError("runtime-context-conflict", str(exc)) from exc
+    if target.is_symlink():
+        raise CoordinatorError(
+            "runtime-context-conflict",
+            f"Frozen runtime context must not be a symbolic link: {target}",
+        )
+    if target.exists():
+        if not target.is_file():
+            raise CoordinatorError(
+                "runtime-context-conflict",
+                f"Frozen runtime context is not a regular file: {target}",
+            )
+        try:
+            current = read_regular_bytes(
+                target,
+                max_bytes=MAX_RUNTIME_CONTEXT_BYTES,
+                label="Frozen runtime context",
+            )
+        except SafeIOError as exc:
+            raise CoordinatorError("runtime-context-conflict", str(exc)) from exc
+        if current != encoded:
+            raise CoordinatorError(
+                "runtime-context-conflict",
+                "Frozen runtime context differs from the validated Run context.",
+            )
+        return target
+
+    try:
+        atomic_write_bytes(
+            target,
+            encoded,
+            mode=0o600,
+            label="Frozen runtime context",
+        )
+    except SafeIOError as exc:
+        raise CoordinatorError("runtime-context-conflict", str(exc)) from exc
+    return target
 
 
 def _decision(name: str, **values: Any) -> dict[str, Any]:
@@ -167,42 +373,28 @@ def _guardian_is_alive(run_dir: Path) -> bool:
 def _spawn_guardian(
     run_dir: Path,
     *,
-    idle_timeout_seconds: float,
+    vault: Path,
+    idle_timeout_seconds: float | None,
 ) -> None:
-    subprocess.Popen(
-        [
-            sys.executable,
-            str(Path(run_guardian.__file__).resolve()),
-            "serve",
-            str(run_dir),
-            "--idle-timeout",
-            str(idle_timeout_seconds),
-        ],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    deadline = time.monotonic() + GUARDIAN_READY_TIMEOUT
-    last_error: Exception | None = None
-    while time.monotonic() < deadline:
-        try:
-            run_guardian.probe_guardian(run_dir, timeout=0.1)
-            return
-        except run_guardian.GuardianError as exc:
-            last_error = exc
-            time.sleep(0.02)
-    raise CoordinatorError(
-        "guardian-unavailable",
-        f"Run guardian did not become ready: {last_error}",
-    )
+    try:
+        run_guardian.ensure_guardian_running(
+            run_dir,
+            vault=vault,
+            idle_timeout_seconds=idle_timeout_seconds,
+        )
+    except (run_guardian.GuardianError, OSError, ValueError) as exc:
+        raise CoordinatorError("guardian-unavailable", str(exc)) from exc
 
 
 def _stop_guardian(run_dir: Path) -> None:
     try:
         run_guardian.stop_guardian(run_dir)
-    except run_guardian.GuardianError:
-        pass
+    except run_guardian.GuardianError as exc:
+        if _guardian_is_alive(run_dir):
+            raise CoordinatorError(
+                "guardian-stop-failed",
+                f"Could not stop the active Run guardian: {exc}",
+            ) from exc
 
 
 def _open_lifecycle(
@@ -211,21 +403,30 @@ def _open_lifecycle(
     vault: Path | None = None,
     run_id: str | None = None,
 ) -> RunLifecycle:
-    expected_vault = (
-        vault.expanduser().resolve()
-        if vault is not None
-        else obsidian_vault_path().expanduser().resolve()
-    )
+    context = _validated_runtime()
+    configured_vault = Path(context["paths"]["vault"]).expanduser().resolve()
+    expected_vault = vault.expanduser().resolve() if vault is not None else configured_vault
+    if expected_vault != configured_vault:
+        raise CoordinatorError(
+            "vault-mismatch",
+            "Manifest Vault differs from the validated runtime Vault.",
+        )
     return RunLifecycle.open(
         manifest,
         contract=WORKFLOW_CONTRACT,
-        configuration_fingerprint=_configuration_fingerprint(),
+        configuration_fingerprint=str(context["configuration_fingerprint"]),
         expected_vault=expected_vault,
-        expected_run_id=run_id or manifest.expanduser().resolve().parent.name,
+        expected_run_id=run_id or manifest.expanduser().parent.resolve().name,
     )
 
 
-def _verify_remote_owner(vault: Path, run_id: str) -> dict[str, Any]:
+def _verify_remote_owner(
+    vault: Path,
+    run_id: str,
+    *,
+    target_date: str,
+    window_days: int,
+) -> dict[str, Any]:
     state = _inspect_task_state(vault)
     if (
         not state
@@ -236,7 +437,98 @@ def _verify_remote_owner(vault: Path, run_id: str) -> dict[str, Any]:
             "ownership-lost",
             "Vault Task State is no longer running under this Run ID.",
         )
+    if (
+        state.get("target_date") != target_date
+        or int(state.get("window_days", 1)) != window_days
+    ):
+        raise CoordinatorError(
+            "intent-conflict",
+            "Vault Task State intent no longer matches the local Run Manifest.",
+        )
     return state
+
+
+def _backed_pending_dirty_paths(
+    *,
+    vault: Path,
+    artifacts: Iterable[ArtifactCandidate],
+    changed_paths: Iterable[Path | str],
+) -> set[str]:
+    """Return declared Vault changes backed by an existing artifact file."""
+    vault_root = vault.expanduser().resolve()
+    backed: set[str] = set()
+    for artifact in artifacts:
+        try:
+            path = anchored_file_path(artifact.path, label="Pending Run Artifact")
+            relative = path.relative_to(vault_root).as_posix()
+            inspect_regular_file(path, label="Pending Run Artifact")
+        except (OSError, RuntimeError, SafeIOError, ValueError):
+            continue
+        backed.add(relative)
+
+    declared: set[str] = set()
+    for value in changed_paths:
+        candidate = Path(value).expanduser()
+        try:
+            resolved = (
+                candidate.resolve()
+                if candidate.is_absolute()
+                else (vault_root / candidate).resolve()
+            )
+            declared.add(resolved.relative_to(vault_root).as_posix())
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return declared & backed
+
+
+def _discover_pending_dirty_paths(snapshot: RunSnapshot) -> set[str]:
+    """Strictly inspect canonical current-phase reports left by a crashed parent."""
+    data = snapshot.as_dict()
+    phase = snapshot.phase
+    stage = stage_report.STAGE_BY_PHASE.get(phase)
+    if stage is None:
+        return set()
+    run_dir = Path(data["paths"]["run_dir"])
+    vault = Path(data["paths"]["vault"])
+    progress_reports = list(
+        islice(
+            run_dir.glob(f"{stage}-progress-*.json"),
+            MAX_PENDING_STAGE_REPORTS + 1,
+        )
+    )
+    if len(progress_reports) > MAX_PENDING_STAGE_REPORTS:
+        raise CoordinatorError(
+            "too-many-pending-reports",
+            "Run directory exceeds the "
+            f"{MAX_PENDING_STAGE_REPORTS}-report recovery safety limit",
+        )
+    candidates = {
+        run_dir / f"{stage}-result.json",
+        *progress_reports,
+    }
+    pending: set[str] = set()
+    for report_path in sorted(path for path in candidates if path.exists()):
+        try:
+            submission = stage_report.load_stage_report(
+                report_path,
+                phase=phase,
+                run_dir=run_dir,
+                vault=vault,
+            )
+            submission.verify_unchanged()
+        except stage_report.StageReportError as exc:
+            raise CoordinatorError(
+                "invalid-pending-report",
+                f"Pending stage report is invalid: {report_path}: {exc}",
+            ) from exc
+        pending.update(
+            _backed_pending_dirty_paths(
+                vault=vault,
+                artifacts=submission.artifacts,
+                changed_paths=submission.changed_paths,
+            )
+        )
+    return pending
 
 
 def _resume_lifecycle(
@@ -244,10 +536,12 @@ def _resume_lifecycle(
     vault: Path,
     *,
     require_user_confirmation: bool = False,
+    pending_dirty_paths: Iterable[str] = (),
 ) -> RunSnapshot:
     snapshot = lifecycle.snapshot()
     observed_dirty = _dirty_paths(vault)
-    unexpected = observed_dirty - set(snapshot.run_change_set)
+    pending = set(pending_dirty_paths)
+    unexpected = observed_dirty - set(snapshot.run_change_set) - pending
     if unexpected:
         raise CoordinatorError(
             "unexpected-dirty-paths",
@@ -255,7 +549,7 @@ def _resume_lifecycle(
             + ", ".join(sorted(unexpected)),
         )
     return lifecycle.resume(
-        observed_dirty_paths=observed_dirty,
+        observed_dirty_paths=observed_dirty - pending,
         require_user_confirmation=require_user_confirmation,
     )
 
@@ -263,7 +557,8 @@ def _resume_lifecycle(
 def _ensure_guardian(
     lifecycle: RunLifecycle,
     *,
-    idle_timeout_seconds: float,
+    idle_timeout_seconds: float | None,
+    pending_dirty_paths: Iterable[str] | None = None,
 ) -> RunSnapshot:
     snapshot = lifecycle.snapshot()
     if snapshot.condition == "attention-required":
@@ -275,9 +570,28 @@ def _ensure_guardian(
     if _guardian_is_alive(run_dir):
         return snapshot
     vault = Path(snapshot.as_dict()["paths"]["vault"])
-    _verify_remote_owner(vault, snapshot.run_id)
-    resumed = _resume_lifecycle(lifecycle, vault)
-    _spawn_guardian(run_dir, idle_timeout_seconds=idle_timeout_seconds)
+    snapshot_data = snapshot.as_dict()
+    _verify_remote_owner(
+        vault,
+        snapshot.run_id,
+        target_date=str(snapshot_data["target_date"]),
+        window_days=snapshot.window_days,
+    )
+    pending = (
+        _discover_pending_dirty_paths(snapshot)
+        if pending_dirty_paths is None
+        else set(pending_dirty_paths)
+    )
+    resumed = _resume_lifecycle(
+        lifecycle,
+        vault,
+        pending_dirty_paths=pending,
+    )
+    _spawn_guardian(
+        run_dir,
+        vault=vault,
+        idle_timeout_seconds=idle_timeout_seconds,
+    )
     return resumed
 
 
@@ -285,16 +599,45 @@ def start(
     *,
     harness: str,
     target_date: str | None = None,
-    idle_timeout_seconds: float = DEFAULT_GUARDIAN_IDLE_TIMEOUT,
+    window_days: int = 1,
+    idle_timeout_seconds: float | None = DEFAULT_GUARDIAN_IDLE_TIMEOUT,
     confirm_attention_run_id: str | None = None,
+    confirm_running_run_id: str | None = None,
 ) -> dict[str, Any]:
     """Start, resume, skip, or request cancellation for one DailyPaper Run."""
     if harness not in {"claude-code", "codex"}:
         raise CoordinatorError("invalid-harness", f"Unsupported Harness: {harness}")
-    vault = obsidian_vault_path().expanduser().resolve()
-    timezone = timezone_name()
-    date = _target_date(target_date, timezone)
-    state = _inspect_task_state(vault)
+    requested_window_days = _window_days(window_days)
+    context, vault, date, inspected, preparation = _prepare_start_runtime(
+        target_date
+    )
+    state = inspected["task_state"]
+    state_window_days = int(state.get("window_days", 1)) if state else None
+
+    if (
+        state
+        and state.get("target_date") == date
+        and state.get("status") in REMOTE_RUNNING | REMOTE_PUBLISHED
+        and state_window_days != requested_window_days
+    ):
+        return _decision(
+            "intent-conflict",
+            code="intent-conflict",
+            message=(
+                f"Existing Run {state.get('run_id')} for {date} uses "
+                f"window_days={state_window_days}; the current request uses "
+                f"window_days={requested_window_days}."
+            ),
+            requested_intent={
+                "target_date": date,
+                "window_days": requested_window_days,
+            },
+            existing_intent={
+                "target_date": state.get("target_date"),
+                "window_days": state_window_days,
+            },
+            run_id=state.get("run_id"),
+        )
 
     if (
         state
@@ -310,12 +653,39 @@ def start(
         local_finalization: dict[str, Any] | None = None
         if local_manifest is not None and local_manifest.exists():
             try:
+                if context is None:
+                    raise CoordinatorError(
+                        "invalid-runtime-context",
+                        "Local finalization requires the validated runtime context.",
+                    )
                 lifecycle = _open_lifecycle(
                     local_manifest,
                     vault=vault,
                     run_id=published_run_id,
                 )
                 snapshot = lifecycle.snapshot()
+                if snapshot.window_days != state_window_days:
+                    return _decision(
+                        "intent-conflict",
+                        code="intent-conflict",
+                        message=(
+                            "The published remote Task State and local Run Manifest "
+                            "use different acquisition windows."
+                        ),
+                        requested_intent={
+                            "target_date": date,
+                            "window_days": requested_window_days,
+                        },
+                        existing_intent={
+                            "target_date": state.get("target_date"),
+                            "window_days": state_window_days,
+                        },
+                        manifest_intent={
+                            "target_date": snapshot.as_dict()["target_date"],
+                            "window_days": snapshot.window_days,
+                        },
+                        run_id=published_run_id,
+                    )
                 content_commit = snapshot.as_dict()["publication"].get(
                     "content_commit"
                 )
@@ -340,6 +710,7 @@ def start(
         return _decision(
             "already-published",
             target_date=date,
+            window_days=state_window_days,
             run_id=published_run_id or None,
             outputs=state.get("outputs", {}),
             local_finalization=local_finalization,
@@ -351,6 +722,7 @@ def start(
         summary = {
             "run_id": run_id,
             "target_date": state.get("target_date"),
+            "window_days": state_window_days,
             "harness": state.get("harness"),
             "owner": state.get("owner"),
             "started_at": state.get("started_at"),
@@ -364,21 +736,77 @@ def start(
                 proposal=proposal,
             )
         if not manifest.exists():
+            proposal = _prepare_cancel(vault, expected_run_id=run_id)
             return _decision(
-                "attention-required",
+                "cancel-confirmation-required",
                 run=summary,
-                problem="Local Run directory exists but its Manifest is missing.",
+                problem=(
+                    "Local Run directory exists but its Manifest is missing; "
+                    "artifacts were preserved."
+                ),
+                proposal=proposal,
             )
-        if _guardian_is_alive(manifest.parent):
-            return _decision("still-running", run=summary, manifest=str(manifest))
 
         try:
+            if context is None:
+                raise CoordinatorError(
+                    "invalid-runtime-context",
+                    "Same-machine recovery requires the validated runtime context.",
+                )
             lifecycle = _open_lifecycle(
                 manifest,
                 vault=vault,
                 run_id=run_id,
             )
             snapshot = lifecycle.snapshot()
+            if (
+                snapshot.window_days != requested_window_days
+                or snapshot.window_days != state_window_days
+            ):
+                return _decision(
+                    "intent-conflict",
+                    code="intent-conflict",
+                    message=(
+                        "The requested, remote, and local Run acquisition windows "
+                        "do not match."
+                    ),
+                    requested_intent={
+                        "target_date": date,
+                        "window_days": requested_window_days,
+                    },
+                    existing_intent={
+                        "target_date": state.get("target_date"),
+                        "window_days": state_window_days,
+                    },
+                    manifest_intent={
+                        "target_date": snapshot.as_dict()["target_date"],
+                        "window_days": snapshot.window_days,
+                    },
+                    run_id=run_id,
+                )
+            if _guardian_is_alive(manifest.parent):
+                if confirm_running_run_id != run_id:
+                    if confirm_running_run_id is not None:
+                        raise CoordinatorError(
+                            "confirmation-required",
+                            (
+                                "Stopping a live Run guardian requires the exact "
+                                f"run ID: {run_id}"
+                            ),
+                        )
+                    return _decision(
+                        "still-running",
+                        run=summary,
+                        manifest=str(manifest),
+                        confirmation_run_id=run_id,
+                        message=(
+                            "This Run still owns the Vault writer lock. Show the "
+                            "exact run ID to the user and obtain explicit "
+                            "confirmation before stopping its guardian."
+                        ),
+                    )
+                _stop_guardian(manifest.parent)
+            context_file = _freeze_runtime_context(manifest, context)
             if snapshot.outcome is not None:
                 return _decision(
                     "blocked",
@@ -386,6 +814,41 @@ def start(
                     message="Remote ownership is running but local Run is terminal.",
                     **_snapshot_fields(snapshot),
                 )
+            state_fingerprint = state.get("config_sha256")
+            if (
+                state_fingerprint is not None
+                and state_fingerprint != context["configuration_fingerprint"]
+            ):
+                raise CoordinatorError(
+                    "config-conflict",
+                    "Remote ownership uses a different configuration fingerprint.",
+                )
+            acquisition_commit = snapshot.as_dict()["publication"].get(
+                "acquisition_commit"
+            )
+            remote_head = inspected.get("remote_head")
+            if acquisition_commit and remote_head and acquisition_commit != remote_head:
+                raise CoordinatorError(
+                    "remote-advanced",
+                    (
+                        f"Remote moved from acquisition commit {acquisition_commit} "
+                        f"to {remote_head}."
+                    ),
+                )
+            if snapshot.phase == "prepared" and acquisition_commit is None:
+                acquisition = vault_coordination.acquire(
+                    manifest,
+                    harness=harness,
+                    expected_remote_head=remote_head,
+                    runtime_context=context,
+                    record_manifest=False,
+                )
+                lifecycle.record_acquisition(
+                    acquisition_commit=str(acquisition["lock_commit"]),
+                    remote=str(acquisition["remote"]),
+                    branch=str(acquisition["branch"]),
+                )
+                snapshot = lifecycle.advance("fetching")
             if snapshot.condition == "attention-required":
                 if confirm_attention_run_id != run_id:
                     return _decision(
@@ -397,12 +860,21 @@ def start(
                 lifecycle,
                 vault,
                 require_user_confirmation=confirm_attention_run_id == run_id,
+                pending_dirty_paths=_discover_pending_dirty_paths(snapshot),
             )
             _spawn_guardian(
                 manifest.parent,
+                vault=vault,
                 idle_timeout_seconds=idle_timeout_seconds,
             )
-            return _decision("ready", mode="resumed", **_snapshot_fields(resumed))
+            return _decision(
+                "ready",
+                mode="resumed",
+                runtime_context=context,
+                runtime_context_file=str(context_file),
+                vault_preparation=preparation,
+                **_snapshot_fields(resumed),
+            )
         except (LifecycleError, CoordinatorError, OSError, ValueError) as exc:
             return _decision(
                 "blocked",
@@ -416,28 +888,39 @@ def start(
                 run_id=run_id,
             )
 
+    if context is None:
+        raise CoordinatorError(
+            "invalid-runtime-context",
+            "A fresh Run requires the validated runtime context.",
+        )
+    timezone = str(context["runtime"]["timezone"])
     run_id = f"{date}-{uuid4().hex[:12]}"
     manifest = _manifest_path(vault, run_id)
     lifecycle = RunLifecycle.create(
         manifest,
         run_id=run_id,
         target_date=date,
+        window_days=requested_window_days,
         timezone=timezone,
         vault=vault,
         contract=WORKFLOW_CONTRACT,
-        configuration_fingerprint=_configuration_fingerprint(),
+        configuration_fingerprint=str(context["configuration_fingerprint"]),
     )
     try:
-        _spawn_guardian(
-            manifest.parent,
-            idle_timeout_seconds=idle_timeout_seconds,
+        context_file = _freeze_runtime_context(manifest, context)
+        acquisition = vault_coordination.acquire(
+            manifest,
+            harness=harness,
+            expected_remote_head=inspected.get("remote_head"),
+            runtime_context=context,
+            record_manifest=False,
         )
-        acquisition = vault_coordination.acquire(manifest, harness=harness)
         if acquisition.get("status") == "already-completed":
             _stop_guardian(manifest.parent)
             return _decision(
                 "already-published",
                 target_date=date,
+                window_days=requested_window_days,
                 outputs={"daily_note": acquisition.get("daily_output")},
             )
         if acquisition.get("status") != "acquired":
@@ -445,14 +928,26 @@ def start(
                 "acquisition-failed",
                 f"Unexpected acquisition result: {acquisition.get('status')}",
             )
-        repository = repository_config()
+        repository = context["repository"]
         lifecycle.record_acquisition(
             acquisition_commit=str(acquisition["lock_commit"]),
             remote=str(acquisition.get("remote", repository["remote"])),
             branch=str(acquisition.get("branch", repository["branch"])),
         )
         snapshot = lifecycle.advance("fetching")
-        return _decision("ready", mode="started", **_snapshot_fields(snapshot))
+        _spawn_guardian(
+            manifest.parent,
+            vault=vault,
+            idle_timeout_seconds=idle_timeout_seconds,
+        )
+        return _decision(
+            "ready",
+            mode="started",
+            runtime_context=context,
+            runtime_context_file=str(context_file),
+            vault_preparation=preparation,
+            **_snapshot_fields(snapshot),
+        )
     except Exception:
         _stop_guardian(manifest.parent)
         raise
@@ -461,24 +956,80 @@ def start(
 def submit(
     manifest: Path,
     *,
-    result: str,
+    result: str | None = None,
     message: str | None = None,
     retry_at: str | None = None,
     artifacts: Iterable[ArtifactCandidate] = (),
     changed_paths: Iterable[Path | str] = (),
-    idle_timeout_seconds: float = DEFAULT_GUARDIAN_IDLE_TIMEOUT,
+    report: Path | None = None,
+    idle_timeout_seconds: float | None = DEFAULT_GUARDIAN_IDLE_TIMEOUT,
 ) -> dict[str, Any]:
     """Submit one parent-Harness phase result; callers cannot choose a phase."""
-    artifact_candidates = tuple(artifacts)
-    change_candidates = tuple(changed_paths)
     lifecycle = _open_lifecycle(manifest)
+    initial_snapshot = lifecycle.snapshot()
+    data = initial_snapshot.as_dict()
+    vault = Path(data["paths"]["vault"])
+    direct_artifacts = tuple(artifacts)
+    direct_changes = tuple(changed_paths)
+    submission: stage_report.StageSubmission | None = None
+
+    if report is not None:
+        if (
+            result is not None
+            or message is not None
+            or retry_at is not None
+            or direct_artifacts
+            or direct_changes
+        ):
+            raise CoordinatorError(
+                "mixed-submission",
+                "Use either --report or direct result arguments, not both.",
+            )
+        submission = stage_report.load_stage_report(
+            report,
+            phase=initial_snapshot.phase,
+            run_dir=Path(data["paths"]["run_dir"]),
+            vault=vault,
+        )
+        result = submission.result
+        message = submission.message
+        retry_at = submission.retry_at
+        artifact_candidates = submission.artifacts
+        change_candidates = submission.changed_paths
+        submission.verify_unchanged()
+    else:
+        artifact_candidates = direct_artifacts
+        change_candidates = direct_changes
+
+    if result is None:
+        raise CoordinatorError(
+            "missing-result",
+            "Submit requires either a stage report or a direct result.",
+        )
+    pending_dirty = _backed_pending_dirty_paths(
+        vault=vault,
+        artifacts=artifact_candidates,
+        changed_paths=change_candidates,
+    )
     snapshot = _ensure_guardian(
         lifecycle,
         idle_timeout_seconds=idle_timeout_seconds,
+        pending_dirty_paths=pending_dirty,
     )
-    data = snapshot.as_dict()
-    vault = Path(data["paths"]["vault"])
-    _verify_remote_owner(vault, snapshot.run_id)
+    if snapshot.phase != initial_snapshot.phase:
+        raise CoordinatorError(
+            "phase-changed",
+            "Run phase changed while the stage report was being prepared.",
+        )
+    if submission is not None:
+        submission.verify_unchanged()
+    snapshot_data = snapshot.as_dict()
+    _verify_remote_owner(
+        vault,
+        snapshot.run_id,
+        target_date=str(snapshot_data["target_date"]),
+        window_days=snapshot.window_days,
+    )
 
     if result == "progress":
         updated = lifecycle.checkpoint(
@@ -489,12 +1040,24 @@ def submit(
         )
         return _decision("ready", mode="checkpointed", **_snapshot_fields(updated))
     if result == "recoverable":
+        lifecycle.checkpoint(
+            artifacts=artifact_candidates,
+            changed_paths=change_candidates,
+            allow_artifact_updates=True,
+            enforce_contract=False,
+        )
         updated = lifecycle.interrupt(
             Interruption(message=message or "Recoverable interruption", retry_at=retry_at)
         )
         _stop_guardian(manifest.parent)
         return _decision("interrupted", **_snapshot_fields(updated))
     if result == "attention":
+        lifecycle.checkpoint(
+            artifacts=artifact_candidates,
+            changed_paths=change_candidates,
+            allow_artifact_updates=True,
+            enforce_contract=False,
+        )
         updated = lifecycle.interrupt(
             Interruption(
                 message=message or "User attention is required",
@@ -506,6 +1069,12 @@ def submit(
         return _decision("attention-required", **_snapshot_fields(updated))
     if result == "deterministic-failure":
         reason = message or "Deterministic failure"
+        lifecycle.checkpoint(
+            artifacts=artifact_candidates,
+            changed_paths=change_candidates,
+            allow_artifact_updates=True,
+            enforce_contract=False,
+        )
         failure = vault_coordination.fail(manifest, message=reason)
         updated = lifecycle.snapshot()
         if updated.outcome is None:
@@ -620,7 +1189,13 @@ def cancel(proposal: dict[str, Any]) -> dict[str, Any]:
         manifest = _manifest_path(Path(str(vault_value)).expanduser().resolve(), run_id)
         if manifest.exists():
             try:
-                data = json.loads(manifest.read_text(encoding="utf-8"))
+                data = load_json_object(
+                    manifest,
+                    max_bytes=MAX_MANIFEST_BYTES,
+                    label="Run Manifest",
+                )
+                if data is None:
+                    raise SafeIOError(f"Run Manifest file does not exist: {manifest}")
                 lifecycle = RunLifecycle.open(
                     manifest,
                     contract=WORKFLOW_CONTRACT,
@@ -657,14 +1232,25 @@ def _parse_artifact(value: str) -> ArtifactCandidate:
 
 
 def _proposal_json(value: str) -> dict[str, Any]:
-    if value.startswith("@"):
-        text = Path(value[1:]).read_text(encoding="utf-8")
-    else:
-        text = value
-    data = json.loads(text)
-    if not isinstance(data, dict):
-        raise ValueError("Cancellation proposal must be a JSON object")
-    return data
+    try:
+        if value.startswith("@"):
+            proposal = load_json_object(
+                Path(value[1:]),
+                max_bytes=MAX_PROPOSAL_BYTES,
+                label="Cancellation proposal",
+            )
+            if proposal is None:
+                raise SafeIOError(
+                    f"Cancellation proposal file does not exist: {value[1:]}"
+                )
+            return proposal
+        return parse_json_object(
+            value.encode("utf-8"),
+            max_bytes=MAX_PROPOSAL_BYTES,
+            label="Cancellation proposal",
+        )
+    except (SafeIOError, UnicodeEncodeError) as exc:
+        raise CoordinatorError("invalid-proposal", str(exc)) from exc
 
 
 def _print_json(value: dict[str, Any]) -> None:
@@ -682,18 +1268,16 @@ def main() -> None:
         choices=("claude-code", "codex"),
     )
     start_parser.add_argument("--date")
+    start_parser.add_argument("--window-days", type=int, default=1)
     start_parser.add_argument("--confirm-attention-run-id")
-    start_parser.add_argument(
-        "--guardian-idle-timeout",
-        type=float,
-        default=DEFAULT_GUARDIAN_IDLE_TIMEOUT,
-    )
+    start_parser.add_argument("--confirm-running-run-id")
 
     submit_parser = subparsers.add_parser("submit")
     submit_parser.add_argument("manifest", type=Path)
-    submit_parser.add_argument(
+    result_group = submit_parser.add_mutually_exclusive_group(required=True)
+    result_group.add_argument("--report", type=Path)
+    result_group.add_argument(
         "--result",
-        required=True,
         choices=(
             "progress",
             "success",
@@ -706,11 +1290,6 @@ def main() -> None:
     submit_parser.add_argument("--retry-at")
     submit_parser.add_argument("--artifact", action="append", default=[], type=_parse_artifact)
     submit_parser.add_argument("--changed-path", action="append", default=[], type=Path)
-    submit_parser.add_argument(
-        "--guardian-idle-timeout",
-        type=float,
-        default=DEFAULT_GUARDIAN_IDLE_TIMEOUT,
-    )
 
     inspect_parser = subparsers.add_parser("inspect")
     inspect_parser.add_argument("manifest", type=Path)
@@ -724,8 +1303,9 @@ def main() -> None:
             response = start(
                 harness=args.harness,
                 target_date=args.date,
-                idle_timeout_seconds=args.guardian_idle_timeout,
+                window_days=args.window_days,
                 confirm_attention_run_id=args.confirm_attention_run_id,
+                confirm_running_run_id=args.confirm_running_run_id,
             )
         elif args.command == "submit":
             response = submit(
@@ -735,7 +1315,7 @@ def main() -> None:
                 retry_at=args.retry_at,
                 artifacts=args.artifact,
                 changed_paths=args.changed_path,
-                idle_timeout_seconds=args.guardian_idle_timeout,
+                report=args.report,
             )
         elif args.command == "inspect":
             response = inspect(args.manifest)
@@ -745,6 +1325,7 @@ def main() -> None:
     except (
         CoordinatorError,
         LifecycleError,
+        stage_report.StageReportError,
         run_guardian.GuardianError,
         vault_coordination.CoordinationError,
     ) as exc:

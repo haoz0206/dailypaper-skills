@@ -14,17 +14,29 @@ import hashlib
 import json
 import os
 import re
+import stat
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
-from uuid import uuid4
+
+from safe_io import (
+    SafeIOError,
+    anchored_file_path,
+    atomic_write_bytes,
+    encode_json_value,
+    load_json_object,
+    sha256_regular_file,
+)
+from safe_path import SafePathError, relative_posix_path, resolve_within
 
 
 MANIFEST_VERSION = 2
 MANIFEST_LOCK_NAME = "manifest.lock"
+MAX_MANIFEST_BYTES = 1024 * 1024
+MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 CONDITIONS = frozenset({"active", "interrupted", "attention-required"})
 OUTCOMES = frozenset({"published", "failed", "cancelled"})
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -191,6 +203,10 @@ class RunSnapshot:
         return str(self._data["run_id"])
 
     @property
+    def window_days(self) -> int:
+        return int(self._data["window_days"])
+
+    @property
     def phase(self) -> str:
         return str(self._data["phase"])
 
@@ -247,22 +263,32 @@ class RunLifecycle:
         *,
         run_id: str,
         target_date: str,
+        window_days: int = 1,
         timezone: str,
         vault: Path,
         contract: WorkflowContract,
         configuration_fingerprint: str,
     ) -> "RunLifecycle":
         """Create a v2 Run Manifest and return its sole local writer."""
-        path = manifest_path.expanduser().resolve()
+        candidate = manifest_path.expanduser()
+        path = anchored_file_path(candidate, label="Run Manifest")
         if path.name != "manifest.json":
             raise ManifestIdentityMismatch(
                 "Run Manifest must be named manifest.json"
             )
+        if candidate.is_symlink():
+            raise ManifestIdentityMismatch("Run Manifest must not be a symlink")
         vault_path = vault.expanduser().resolve()
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
         if not DATE_PATTERN.fullmatch(target_date):
             raise ValueError("target_date must use YYYY-MM-DD")
+        if (
+            isinstance(window_days, bool)
+            or not isinstance(window_days, int)
+            or not 1 <= window_days <= 31
+        ):
+            raise ValueError("window_days must be an integer from 1 to 31")
         if not timezone.strip():
             raise ValueError("timezone must not be empty")
         _require_sha256(configuration_fingerprint, "Configuration Fingerprint")
@@ -275,6 +301,7 @@ class RunLifecycle:
                 "revision": 0,
                 "run_id": run_id,
                 "target_date": target_date,
+                "window_days": window_days,
                 "timezone": timezone,
                 "phase": contract.phases[0],
                 "condition": "active",
@@ -331,7 +358,7 @@ class RunLifecycle:
         expected_run_id: str,
     ) -> "RunLifecycle":
         """Open a Run Manifest, falling back to its previous atomic snapshot."""
-        path = manifest_path.expanduser().resolve()
+        path = anchored_file_path(manifest_path, label="Run Manifest")
         vault = expected_vault.expanduser().resolve()
         if path.name != "manifest.json":
             raise ManifestIdentityMismatch(
@@ -380,6 +407,11 @@ class RunLifecycle:
                     contract=contract,
                     configuration_fingerprint=configuration_fingerprint,
                 )
+                # A symlinked current snapshot is invalid input, but once the
+                # previous snapshot has been validated under the Manifest lock
+                # it is safe to remove the link itself and restore the file.
+                if path.is_symlink():
+                    path.unlink()
                 _atomic_write(path, _encode(data))
                 recovered = True
 
@@ -400,6 +432,18 @@ class RunLifecycle:
     def snapshot(self) -> RunSnapshot:
         """Return the current validated lifecycle projection."""
         return _snapshot(self._load())
+
+    def verify_publication_inputs(self) -> RunSnapshot:
+        """Revalidate every registered artifact and claimed Vault path."""
+        data = self._load()
+        _require_mutable(data)
+        if data["phase"] != self._contract.phases[-1]:
+            raise InvalidTransition(
+                "Publication inputs can be verified only in the final phase"
+            )
+        _verify_artifacts(data)
+        _require_change_set_artifacts(data)
+        return _snapshot(data)
 
     def checkpoint(
         self,
@@ -475,18 +519,10 @@ class RunLifecycle:
                 self._contract,
             )
 
-        vault_artifact_paths = {
-            artifact["path"]
-            for artifact in proposed_artifacts.values()
-            if artifact["scope"] == "vault"
-        }
-        for relative in proposed_change_set:
-            changed = vault / relative
-            if changed.exists() and relative not in vault_artifact_paths:
-                raise CheckpointRequired(
-                    f"Existing Run Change Set path requires a verified Artifact: "
-                    f"{relative}"
-                )
+        proposed = copy.deepcopy(data)
+        proposed["artifacts"] = proposed_artifacts
+        proposed["run_change_set"] = proposed_change_set
+        _require_change_set_artifacts(proposed)
 
         if (
             proposed_artifacts == data["artifacts"]
@@ -728,16 +764,33 @@ def _snapshot(data: Mapping[str, Any]) -> RunSnapshot:
 
 
 def _encode(data: Mapping[str, Any]) -> bytes:
-    return (
-        json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    ).encode("utf-8")
+    try:
+        return encode_json_value(
+            data,
+            max_bytes=MAX_MANIFEST_BYTES,
+            label="Run Manifest",
+        )
+    except SafeIOError as exc:
+        raise LifecycleError(str(exc)) from exc
 
 
 @contextmanager
 def _manifest_file_lock(manifest_path: Path) -> Iterator[None]:
     lock_path = manifest_path.parent / MANIFEST_LOCK_NAME
-    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except OSError as exc:
+        raise LifecycleError(
+            f"Run Manifest lock cannot be opened safely: {lock_path}"
+        ) from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise LifecycleError(
+                f"Run Manifest lock is not a regular file: {lock_path}"
+            )
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         yield
     finally:
@@ -746,24 +799,15 @@ def _manifest_file_lock(manifest_path: Path) -> Iterator[None]:
 
 
 def _atomic_write(path: Path, payload: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
     try:
-        with temporary.open("xb") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        directory_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    finally:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
+        atomic_write_bytes(
+            path,
+            payload,
+            mode=0o600,
+            label="Run Manifest snapshot",
+        )
+    except SafeIOError as exc:
+        raise LifecycleError(str(exc)) from exc
 
 
 def _read_and_validate(
@@ -773,7 +817,17 @@ def _read_and_validate(
     expected_vault: Path,
     expected_run_id: str,
 ) -> dict[str, Any]:
-    data = json.loads(source_path.read_text(encoding="utf-8"))
+    data = load_json_object(
+        source_path,
+        max_bytes=MAX_MANIFEST_BYTES,
+        label="Run Manifest",
+    )
+    if data is None:  # Defensive: required=True must already reject this state.
+        raise ValueError(f"Run Manifest file does not exist: {source_path}")
+    # Pre-release Manifest v2 did not persist the acquisition window. Before
+    # this contract existed all runs were one-day runs, so normalize only that
+    # unambiguous legacy shape.
+    data.setdefault("window_days", 1)
     _validate_manifest(data)
     _validate_manifest_identity(
         data,
@@ -791,7 +845,7 @@ def _validate_manifest_identity(
     expected_vault: Path,
     expected_run_id: str,
 ) -> None:
-    path = manifest_path.expanduser().resolve()
+    path = anchored_file_path(manifest_path, label="Run Manifest")
     vault = expected_vault.expanduser().resolve()
     run_dir = path.parent
     if path.name != "manifest.json":
@@ -856,6 +910,7 @@ def _validate_manifest(data: Any) -> None:
         "revision",
         "run_id",
         "target_date",
+        "window_days",
         "timezone",
         "phase",
         "condition",
@@ -883,6 +938,12 @@ def _validate_manifest(data: Any) -> None:
         or not DATE_PATTERN.fullmatch(data["target_date"])
     ):
         raise SchemaError("Run Manifest target_date must use YYYY-MM-DD")
+    if (
+        isinstance(data["window_days"], bool)
+        or not isinstance(data["window_days"], int)
+        or not 1 <= data["window_days"] <= 31
+    ):
+        raise SchemaError("Run Manifest window_days must be an integer from 1 to 31")
     if not isinstance(data["timezone"], str) or not data["timezone"]:
         raise SchemaError("Run Manifest timezone must not be empty")
     workflow_contract = data["workflow_contract"]
@@ -1130,10 +1191,11 @@ def _require_mutable(data: Mapping[str, Any]) -> None:
 
 
 def _safe_relative_text(value: Any) -> bool:
-    if not isinstance(value, str) or not value:
+    try:
+        relative_posix_path(value, label="Run path")
+    except SafePathError:
         return False
-    path = Path(value)
-    return not path.is_absolute() and ".." not in path.parts
+    return True
 
 
 def _vault_relative(value: Path | str, vault: Path) -> str:
@@ -1152,9 +1214,10 @@ def _vault_relative(value: Path | str, vault: Path) -> str:
 
 
 def _artifact_reference(path: Path, *, vault: Path, run_dir: Path) -> dict[str, str]:
-    candidate = path.expanduser().resolve()
-    if not candidate.is_file():
-        raise ArtifactConflict(f"Run Artifact does not exist as a file: {candidate}")
+    try:
+        candidate = anchored_file_path(path, label="Run Artifact")
+    except SafeIOError as exc:
+        raise ArtifactConflict(str(exc)) from exc
     for scope, root in (("run", run_dir.resolve()), ("vault", vault.resolve())):
         try:
             relative = candidate.relative_to(root)
@@ -1167,11 +1230,14 @@ def _artifact_reference(path: Path, *, vault: Path, run_dir: Path) -> dict[str, 
 
 
 def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.expanduser().resolve().open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    try:
+        return sha256_regular_file(
+            anchored_file_path(path, label="Run Artifact"),
+            max_bytes=MAX_ARTIFACT_BYTES,
+            label="Run Artifact",
+        )
+    except SafeIOError as exc:
+        raise ArtifactConflict(str(exc)) from exc
 
 
 def _verify_artifacts(data: Mapping[str, Any]) -> None:
@@ -1180,14 +1246,51 @@ def _verify_artifacts(data: Mapping[str, Any]) -> None:
     roots = {"vault": vault, "run": run_dir}
     for artifact in data["artifacts"].values():
         root = roots[artifact["scope"]].resolve()
-        path = (root / artifact["path"]).resolve()
         try:
-            path.relative_to(root)
-        except ValueError as exc:
+            path = resolve_within(
+                root,
+                artifact["path"],
+                label="Run Artifact",
+            )
+        except SafePathError as exc:
             raise ArtifactConflict(
-                f"Run Artifact escaped its verified root: {path}"
+                f"Run Artifact escaped its verified root: {artifact['path']}"
             ) from exc
-        if not path.is_file() or _sha256_file(path) != artifact["sha256"]:
+        if _sha256_file(path) != artifact["sha256"]:
             raise ArtifactConflict(
                 f"Run Artifact differs from its verified checkpoint: {path}"
+            )
+
+
+def _require_change_set_artifacts(data: Mapping[str, Any]) -> None:
+    """Require every existing claimed Vault path to have a verified artifact."""
+    vault = Path(data["paths"]["vault"]).resolve()
+    artifact_paths = {
+        artifact["path"]
+        for artifact in data["artifacts"].values()
+        if artifact["scope"] == "vault"
+    }
+    for relative in data["run_change_set"]:
+        try:
+            changed = resolve_within(
+                vault,
+                relative,
+                label="Run Change Set path",
+            )
+        except SafePathError as exc:
+            raise ArtifactConflict(
+                f"Run Change Set path cannot be inspected safely: {relative}"
+            ) from exc
+        try:
+            changed.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ArtifactConflict(
+                f"Run Change Set path cannot be inspected safely: {relative}"
+            ) from exc
+        if relative not in artifact_paths:
+            raise CheckpointRequired(
+                "Existing Run Change Set path requires a verified Artifact: "
+                f"{relative}"
             )

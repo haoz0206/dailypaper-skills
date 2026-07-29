@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import sys
@@ -7,6 +8,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 SHARED = (
@@ -50,11 +52,50 @@ class RunLifecycleTests(unittest.TestCase):
             self.manifest,
             run_id="2026-07-28-run-1",
             target_date="2026-07-28",
+            window_days=7,
             timezone="Asia/Shanghai",
             vault=self.vault,
             contract=self.contract,
             configuration_fingerprint=self.fingerprint,
         )
+
+    def test_manifest_freezes_window_and_validates_bounds(self) -> None:
+        self.assertEqual(self.lifecycle.snapshot().window_days, 7)
+        self.assertEqual(
+            json.loads(self.manifest.read_text(encoding="utf-8"))["window_days"],
+            7,
+        )
+        for value in (0, 32, True):
+            with self.subTest(window_days=value):
+                with self.assertRaisesRegex(ValueError, "1 to 31"):
+                    run_lifecycle.RunLifecycle.create(
+                        self.root / f"invalid-{value}" / "manifest.json",
+                        run_id=f"invalid-{value}",
+                        target_date="2026-07-28",
+                        window_days=value,
+                        timezone="Asia/Shanghai",
+                        vault=self.vault,
+                        contract=self.contract,
+                        configuration_fingerprint=self.fingerprint,
+                    )
+
+    def test_open_normalizes_pre_release_manifest_to_one_day(self) -> None:
+        data = json.loads(self.manifest.read_text(encoding="utf-8"))
+        data.pop("window_days")
+        self.manifest.write_text(
+            json.dumps(data, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+        opened = run_lifecycle.RunLifecycle.open(
+            self.manifest,
+            contract=self.contract,
+            configuration_fingerprint=self.fingerprint,
+            expected_vault=self.vault,
+            expected_run_id="2026-07-28-run-1",
+        )
+
+        self.assertEqual(opened.snapshot().window_days, 1)
 
     def _complete_current_phase(self, name: str) -> None:
         artifact = self.run_dir / f"{name}.json"
@@ -128,6 +169,51 @@ class RunLifecycleTests(unittest.TestCase):
             )
 
         self.assertEqual(self.lifecycle.snapshot().condition, "interrupted")
+
+    def test_checkpoint_and_resume_reject_symlinked_artifacts(self) -> None:
+        self.lifecycle.advance("fetching")
+        target = self.run_dir / "target.json"
+        target.write_text('{"complete": true}', encoding="utf-8")
+        linked = self.run_dir / "linked.json"
+        linked.symlink_to(target)
+
+        with self.assertRaises(run_lifecycle.ArtifactConflict):
+            self.lifecycle.checkpoint(
+                artifacts=[
+                    run_lifecycle.ArtifactCandidate("candidates", linked),
+                ]
+            )
+
+        artifact = self.run_dir / "candidates.json"
+        artifact.write_bytes(target.read_bytes())
+        self.lifecycle.checkpoint(
+            artifacts=[
+                run_lifecycle.ArtifactCandidate("candidates", artifact),
+            ]
+        )
+        artifact.unlink()
+        artifact.symlink_to(target)
+
+        with self.assertRaises(run_lifecycle.ArtifactConflict):
+            self.lifecycle.advance("reviewing")
+
+    def test_checkpoint_bounds_artifact_hashing(self) -> None:
+        self.lifecycle.advance("fetching")
+        artifact = self.run_dir / "candidates.json"
+        artifact.write_bytes(b"oversized")
+
+        with (
+            patch.object(run_lifecycle, "MAX_ARTIFACT_BYTES", 4),
+            self.assertRaisesRegex(
+                run_lifecycle.ArtifactConflict,
+                "safety limit",
+            ),
+        ):
+            self.lifecycle.checkpoint(
+                artifacts=[
+                    run_lifecycle.ArtifactCandidate("candidates", artifact),
+                ]
+            )
 
     def test_terminal_outcomes_are_immutable(self) -> None:
         cancelled = self.lifecycle.finish("cancelled", reason="confirmed by user")
@@ -222,6 +308,99 @@ class RunLifecycleTests(unittest.TestCase):
         self.assertTrue(recovered.recovered_from_previous)
         self.assertEqual(recovered.snapshot().revision, expected_previous.revision)
         self.assertEqual(recovered.snapshot().phase, "fetching")
+
+    def test_open_does_not_follow_symlinked_current_snapshot(self) -> None:
+        self.lifecycle.advance("fetching")
+        expected_previous = json.loads(
+            self.manifest.with_name("manifest.prev.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        outside = self.root / "outside-manifest.json"
+        outside.write_bytes(self.manifest.read_bytes())
+        self.manifest.unlink()
+        self.manifest.symlink_to(outside)
+
+        recovered = run_lifecycle.RunLifecycle.open(
+            self.manifest,
+            contract=self.contract,
+            configuration_fingerprint=self.fingerprint,
+            expected_vault=self.vault,
+            expected_run_id="2026-07-28-run-1",
+        )
+
+        self.assertTrue(recovered.recovered_from_previous)
+        self.assertFalse(self.manifest.is_symlink())
+        self.assertEqual(recovered.snapshot().revision, expected_previous["revision"])
+
+    def test_open_rejects_duplicate_and_oversize_manifest_documents(self) -> None:
+        previous = self.manifest.with_name("manifest.prev.json")
+        previous.unlink(missing_ok=True)
+        duplicate = self.manifest.read_text(encoding="utf-8").replace(
+            '"version": 2,',
+            '"version": 2,\n  "version": 2,',
+            1,
+        )
+        self.manifest.write_text(duplicate, encoding="utf-8")
+        with self.assertRaisesRegex(
+            run_lifecycle.ManifestCorrupt,
+            "duplicate JSON key",
+        ):
+            run_lifecycle.RunLifecycle.open(
+                self.manifest,
+                contract=self.contract,
+                configuration_fingerprint=self.fingerprint,
+                expected_vault=self.vault,
+                expected_run_id="2026-07-28-run-1",
+            )
+
+        self.manifest.write_bytes(
+            b"{" + b" " * run_lifecycle.MAX_MANIFEST_BYTES + b"}"
+        )
+        with self.assertRaisesRegex(run_lifecycle.ManifestCorrupt, "safety limit"):
+            run_lifecycle.RunLifecycle.open(
+                self.manifest,
+                contract=self.contract,
+                configuration_fingerprint=self.fingerprint,
+                expected_vault=self.vault,
+                expected_run_id="2026-07-28-run-1",
+            )
+
+    def test_open_rejects_non_portable_manifest_paths(self) -> None:
+        base = self.lifecycle.snapshot().as_dict()
+        unsafe_paths = (
+            "DailyPapers\\today.md",
+            "DailyPapers/\nsecret.md",
+            "DailyPapers/\x7fsecret.md",
+            "x" * 4097,
+        )
+        for path in unsafe_paths:
+            with self.subTest(path=path[:80]):
+                data = copy.deepcopy(base)
+                data["change_set"] = [path]
+                self.manifest.write_text(json.dumps(data), encoding="utf-8")
+                self.manifest.with_name("manifest.prev.json").unlink(missing_ok=True)
+                with self.assertRaises(run_lifecycle.ManifestCorrupt):
+                    run_lifecycle.RunLifecycle.open(
+                        self.manifest,
+                        contract=self.contract,
+                        configuration_fingerprint=self.fingerprint,
+                        expected_vault=self.vault,
+                        expected_run_id="2026-07-28-run-1",
+                    )
+
+    def test_manifest_lock_must_not_be_a_symlink(self) -> None:
+        lock = self.run_dir / run_lifecycle.MANIFEST_LOCK_NAME
+        lock.unlink()
+        outside = self.root / "outside.lock"
+        outside.touch()
+        lock.symlink_to(outside)
+
+        with self.assertRaisesRegex(
+            run_lifecycle.LifecycleError,
+            "cannot be opened safely",
+        ):
+            self.lifecycle.interrupt(run_lifecycle.Interruption("test"))
 
     def test_attention_required_and_schema_validation(self) -> None:
         attention = self.lifecycle.interrupt(

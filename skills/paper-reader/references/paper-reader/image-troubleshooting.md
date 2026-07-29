@@ -28,14 +28,17 @@ ar5iv 的 asset 编号（x1.png, x2.png...）**不一定对应论文的 Figure �
 - 适合获取 arXiv HTML 中缺失的方法概览图
 
 ### 来源 C: PDF 提取（最终 fallback）
+
+不要自行用 `curl` 下载或直接向 Vault 的 `assets/` 写入未经验证的内容。先在笔记中
+保留规范化后的 arXiv Figure 外链，再运行统一的本地化脚本：
+
 ```bash
-PAPER_TMP_DIR="$(mktemp -d)"
-trap 'rm -f "$PAPER_TMP_DIR/paper.pdf"; rmdir "$PAPER_TMP_DIR"' EXIT
-curl -fsSL -o "$PAPER_TMP_DIR/paper.pdf" "https://arxiv.org/pdf/{arxiv_id}.pdf"
-mkdir -p {笔记所在目录}/assets/
-pdfimages -png "$PAPER_TMP_DIR/paper.pdf" {笔记所在目录}/assets/{方法名}_fig
+python3 "{SKILL_ROOT}/scripts/daily/download_note_images.py" \
+  "{笔记完整路径}" --vault "{VAULT_PATH}"
 ```
-提取后验证：文件 >10KB，并打开图片确认内容正确。
+
+脚本会在隔离临时目录中有界下载官方 PDF、运行受限的 `pdfimages`、验证文件魔数与
+大小，再用内容哈希命名并原子发布到 Vault。最后仍需打开图片确认语义内容正确。
 
 ## 选择性本地化（解决外链不可达）
 
