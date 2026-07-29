@@ -13,7 +13,7 @@ as breaking changes.
 
 - Nothing yet.
 
-## [1.0.0] - 2026-07-29
+## [1.0.0] - 2026-07-30
 
 First formal release of the maintained unified-harness derivative.
 

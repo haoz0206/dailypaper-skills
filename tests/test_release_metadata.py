@@ -54,7 +54,7 @@ class ReleaseMetadataTests(unittest.TestCase):
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
         self.assertIn("## [Unreleased]", changelog)
-        self.assertIn("## [1.0.0] - 2026-07-29", changelog)
+        self.assertIn("## [1.0.0] - 2026-07-30", changelog)
         self.assertIn("installation", changelog)
         self.assertIn("acceptance, arXiv window semantics", changelog)
         self.assertIn("[1.0.0]:", changelog)
