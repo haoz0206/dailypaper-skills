@@ -38,6 +38,9 @@ First formal release of the maintained unified-harness derivative.
   safety checks, source compilation, regression tests, and patch formatting.
 - A pinned `skills@1.5.20` Claude Code/Codex installation smoke test that
   verifies exact copied trees before every release.
+- A release-oriented deployment guide covering prerequisites, installation
+  acceptance, arXiv window semantics, local scheduling, recovery,
+  troubleshooting, upgrades, rollback, and uninstall.
 
 ### Changed
 

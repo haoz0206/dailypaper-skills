@@ -12,11 +12,36 @@ class ReleaseMetadataTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
         self.assertIn("dailypaper-skills.git#v1.0.0", readme)
-        self.assertIn("npx skills@1.5.20 add", readme)
+        self.assertIn("npx --yes skills@1.5.20 add", readme)
+        self.assertIn("Node.js | 22.20.0+", readme)
+        self.assertIn("GitHub Releases", readme)
+        self.assertIn("tag 尚未发布时", readme)
         self.assertNotIn("#codex%2Funified-harness", readme)
         self.assertIn("huangkiki/dailypaper-skills", readme)
         self.assertIn("[NOTICE](NOTICE)", readme)
         self.assertIn("Apache License 2.0", readme)
+
+    def test_readme_documents_daily_semantics_and_safe_scheduling(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn("不是严格的自然日提交时间过滤", readme)
+        self.assertIn("约 2–3 个日历日", readme)
+        self.assertIn("Codex Scheduled tasks", readme)
+        self.assertIn("Claude Code Routines", readme)
+        self.assertIn("关闭 isolated worktree", readme)
+        self.assertIn("不是本 opinionated deployment 的开箱即用入口", readme)
+        self.assertIn("不要在 Skill 外部执行 git pull/add/commit/push", readme)
+        self.assertIn("远程显示 running 但本机没有对应 run 目录", readme)
+
+    def test_readme_has_acceptance_recovery_and_lifecycle_guidance(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn("### 安装后验收", readme)
+        self.assertIn("## 常见问题", readme)
+        self.assertIn("## 升级、回滚与卸载", readme)
+        self.assertIn("git ls-remote", readme)
+        self.assertIn("attention-required", readme)
+        self.assertIn("npx --yes skills@1.5.20 remove", readme)
 
     def test_notice_identifies_the_upstream_derivative(self) -> None:
         notice = (ROOT / "NOTICE").read_text(encoding="utf-8")
@@ -30,6 +55,8 @@ class ReleaseMetadataTests(unittest.TestCase):
 
         self.assertIn("## [Unreleased]", changelog)
         self.assertIn("## [1.0.0] - 2026-07-29", changelog)
+        self.assertIn("installation", changelog)
+        self.assertIn("acceptance, arXiv window semantics", changelog)
         self.assertIn("[1.0.0]:", changelog)
 
     def test_release_workflow_is_tagged_main_only_and_regenerates_notes(self) -> None:

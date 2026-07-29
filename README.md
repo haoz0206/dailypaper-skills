@@ -1,5 +1,8 @@
 # DailyPaper Skills
 
+[![CI](https://github.com/haoz0206/dailypaper-skills/actions/workflows/ci.yml/badge.svg)](https://github.com/haoz0206/dailypaper-skills/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 一套可由 Claude Code、Codex 和兼容 Agent Skills 安装器共同使用的论文发现、筛选、
 阅读与 Obsidian 知识库工作流。
 
@@ -49,12 +52,23 @@ DailyPaper Skills 将每日论文任务收敛为几条稳定的自然语言入�
 
 ## 环境要求
 
-- Claude Code 或 Codex
-- Python 3.10+
-- Git 与可访问固定 Vault 远程的 SSH key
-- Obsidian（输出本质是 Markdown，但使用了 wikilink 和 MOC）
-- `poppler-utils`（PDF 文本与图片回退）
-- Zotero（可选；普通 arXiv 和本地 PDF 输入不需要）
+| 依赖 | 要求 | 用途 |
+| --- | --- | --- |
+| Harness | Claude Code 或 Codex | 发现并执行 Skills |
+| Python | 3.10+ | 工作流和协调器运行时 |
+| Node.js | 22.20.0+，包含 `npm` / `npx` | 仅用于 `skills@1.5.20` 安装器 |
+| Git / SSH | 能读取并推送固定 Vault 远程 | 同步、锁和精确发布 |
+| Obsidian | 推荐安装 | 阅读 wikilink、MOC 和 Markdown 输出 |
+| Poppler | `pdftotext`、`pdfimages` | PDF 文本与图片回退 |
+| Zotero | 可选 | 仅用于显式 Zotero 输入 |
+
+确认基础版本：
+
+```bash
+python3 --version
+node --version
+git --version
+```
 
 安装 Poppler：
 
@@ -71,12 +85,17 @@ brew install poppler
 首个正式版本使用固定 tag 安装，避免后续分支变更悄悄改变已经部署的工作流：
 
 ```bash
-npx skills@1.5.20 add \
+npx --yes skills@1.5.20 add \
   "https://github.com/haoz0206/dailypaper-skills.git#v1.0.0" \
   --skill configure-dailypaper daily-papers paper-reader generate-mocs \
   --agent claude-code codex \
   --global --yes
 ```
+
+> [!NOTE]
+> 请先在 [GitHub Releases](https://github.com/haoz0206/dailypaper-skills/releases)
+> 确认 `v1.0.0` 已发布。tag 尚未发布时，上述命令不会成功；维护者测试或发布前验收
+> 应使用下面的开发 checkout。不要把 `main` 当作可复现的生产版本。
 
 安装器会在 `.agents/skills` 保存通用 Skill，并为支持的 harness 创建对应入口。
 如果文件系统不支持符号链接，可以追加 `--copy`；之后升级时应重新执行完整安装命令，
@@ -85,10 +104,17 @@ npx skills@1.5.20 add \
 开发 checkout 可以直接作为安装源：
 
 ```bash
-npx skills@1.5.20 add /workspace/dailypaper-skills \
+npx --yes skills@1.5.20 add /workspace/dailypaper-skills \
   --skill configure-dailypaper daily-papers paper-reader generate-mocs \
   --agent claude-code codex \
-  --yes
+  --global --yes
+```
+
+安装后重启或新建 Harness 会话，再确认两个入口都能发现四个 Skill：
+
+```bash
+npx --yes skills@1.5.20 list --global --agent claude-code
+npx --yes skills@1.5.20 list --global --agent codex
 ```
 
 ## 首次配置
@@ -140,6 +166,24 @@ Linux 服务器推荐使用 `/workspace/dailypaper-vault`。Mac 可以配置不�
 Vault、Zotero、SSH key 和 harness 安装路径是机器配置，不允许写入共享 Vault 配置。
 不存在运行时消费者的字段会被拒绝，而不是被静默保存。
 
+### 安装后验收
+
+在第一次日报前完成以下检查：
+
+1. 执行 `查看当前每日论文配置`，确认 Vault、远程、分支和研究配置均已解析；
+2. 确认本机配置只保存绝对路径，没有把凭据写入 Vault；
+3. 确认 Vault 工作树干净，且 SSH 能读取固定远程：
+
+   ```bash
+   git -C /workspace/dailypaper-vault status --short
+   git ls-remote git@github.com:haoz0206/dailypaper-vault.git HEAD
+   ```
+
+4. 手动运行一次 `今日论文推荐`，检查日报、笔记、MOC 和远程提交；
+5. 只有首次手动运行成功后，才创建无人值守定时任务。
+
+Mac 上若使用不同 Vault 路径，把上面的 `-C` 参数替换成该机器配置中的绝对路径。
+
 ## 使用
 
 ### 每日推荐
@@ -152,6 +196,11 @@ Vault、Zotero、SSH key 和 harness 安装路径是机器配置，不允许写�
 
 抓取窗口是不可变的 Run intent。同一天重复相同窗口可以幂等恢复；同一天改用不同
 窗口会返回 `intent-conflict`，不会复用另一份日报或自动取消现有任务。
+
+“今日”表示单日运行意图和目标日报日期，不是严格的自然日提交时间过滤。arXiv 的最新
+批次在周末、节假日或公告边界可能覆盖约 2–3 个日历日；单日模式保留该完整批次，再由
+历史记录去重。`过去3天` 和 `过去一周` 会应用明确的日期范围过滤。当前版本不提供
+“只接受目标自然日 submitted date”的严格当天模式。
 
 ### 阅读论文
 
@@ -208,6 +257,45 @@ Zotero 只在输入明确指向 Zotero 时启用，并且只查询临时只读 S
 协调器会自行检查远程 Task State、同步 Vault、取得 writer lock，并在失败后从原
 `run_id` 恢复。
 
+推荐把下面的完整内容作为每天任务的 prompt：
+
+```text
+在这台已经完成 DailyPaper onboarding 的机器上执行“今日论文推荐”。
+显式使用 daily-papers Skill，并复用它返回的同一个 Runtime Context。
+不要在 Skill 外部执行 git pull/add/commit/push，不要自行修改锁、Task State 或 Manifest。
+如果存在可验证的同机 run，就恢复原 run_id；不要新建或抢占。
+如果远程显示 running 但本机没有对应 run 目录，报告精确 run_id 并等待人工确认，
+不要自动取消旧 run。
+完成后报告 run_id、日报路径、写入的论文笔记和最终发布状态。
+```
+
+### Harness 入口
+
+| Harness | 持久调度入口 | 本地文件要求 |
+| --- | --- | --- |
+| Codex | ChatGPT/Codex 桌面端的 **Scheduled** | 选择 Vault 的固定本地 clone，并使用 local project 模式；机器需开机且桌面端保持运行 |
+| Claude Code | **Desktop scheduled tasks** | 选择 Vault 的固定本地 clone，并关闭 isolated worktree；机器需开机且桌面端保持运行 |
+| Claude Code Cloud | **Routines**，可在网页或 CLI 中用 `/schedule` 创建 | 每次从 GitHub fresh clone；不能直接使用服务器的 `/workspace/dailypaper-vault` |
+| Claude Code CLI | `/loop` | 仅适合短期轮询；会话必须保持运行，且循环任务会过期 |
+
+Codex CLI 和 IDE 扩展不提供 Scheduled 管理界面；应在桌面端或网页创建和管理任务。
+Claude Code 的 `/loop` 也不是长期服务器定时器。不要为本工作流启用每次运行新建
+worktree 的选项：Vault 的固定 clone、机器配置和本地恢复目录共同构成同机恢复边界。
+
+Cloud Routine 目前不是本 opinionated deployment 的开箱即用入口。要采用它，环境
+setup 必须安装四个 Skill、为每次 fresh clone 完成机器配置，并允许对 Vault
+`main` 做受控 push；在这些条件被单独测试前，应使用固定服务器 clone 上的本地调度。
+
+若必须用系统 `cron` / `systemd` 启动 Harness，请仍把上面的完整 prompt 交给公共
+Skill，并让每次进程在
+`/workspace/dailypaper-vault` 可写、SSH 可用的环境中运行，不要把 Git 生命周期拆到
+外层脚本。
+
+当前官方说明：
+[Codex Scheduled tasks](https://learn.chatgpt.com/docs/automations)、
+[Claude Code scheduling](https://code.claude.com/docs/en/scheduled-tasks)、
+[Claude Code Routines](https://code.claude.com/docs/en/routines)。
+
 ## 安全与恢复
 
 - 远程 Vault Task State 是跨机器所有权依据；本地 Manifest 只用于同机恢复。
@@ -221,6 +309,40 @@ Zotero 只在输入明确指向 Zotero 时启用，并且只查询临时只读 S
 
 详细协议见 [HARNESS_CONTRACT.md](HARNESS_CONTRACT.md)，实现边界见
 [ARCHITECTURE.md](ARCHITECTURE.md)。
+
+## 常见问题
+
+| 现象 | 安全处理 |
+| --- | --- |
+| 报告尚未配置或 Vault path 悬空 | 先运行 `配置每日论文`；不要手写或复制别台机器的绝对路径 |
+| SSH 认证或远程读取失败 | 在同一非交互环境运行 `git ls-remote ... HEAD`；修复 deploy key / agent 后重试 |
+| Vault remote 或 branch 不匹配 | 不要 force、更换远程或迁移状态；使用正确 clone，或让 onboarding 重新验证 |
+| Vault 存在用户的 dirty 文件 | 保留这些修改，由用户先提交或整理；禁止 `git reset --hard` 或自动覆盖 |
+| 返回 `intent-conflict` | 使用原窗口恢复，或等待当前 run 完成；取消必须确认精确 `run_id` |
+| 远程 `running`，本机缺少 run 目录 | 视为跨机器恢复；展示精确 ID，人工确认安全后才允许 CAS 取消 |
+| PDF 无文本、图片或公式 | 确认 Poppler 可执行文件存在；原始论文和失败产物会保留供恢复 |
+| `attention-required` | 查看报告中的冲突或校验失败；该状态不会自动恢复或自动取消 |
+
+任何异常重试都应再次调用原公共 Skill，让 coordinator 决定 start 或 resume。不要手工
+删除 `.dailypaper/tasks`、本地 run 目录、guardian 或 Git 锁文件来“解锁”。
+
+## 升级、回滚与卸载
+
+- 升级：在确认没有 active run、Vault 工作树干净后，把安装命令中的 immutable tag
+  改为目标版本并重新执行完整命令。使用过 `--copy` 时必须再次加上 `--copy`。
+- 回滚：先备份 Vault 与本机配置，再用旧的 immutable tag 重装。状态或配置 schema
+  跨大版本不保证可逆；不要在 active run 中降级。
+- 卸载：下面的命令只移除 Harness 中的四个 Skill，不删除 Vault、机器配置或论文：
+
+  ```bash
+  npx --yes skills@1.5.20 remove \
+    --skill configure-dailypaper daily-papers paper-reader generate-mocs \
+    --agent claude-code codex \
+    --global --yes
+  ```
+
+版本行为以 [CHANGELOG.md](CHANGELOG.md) 为准。发布前先阅读 breaking changes，再在
+一台非主运行机器上完成安装和单次日报验收。
 
 ## 架构
 
