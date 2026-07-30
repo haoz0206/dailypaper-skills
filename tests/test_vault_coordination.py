@@ -242,15 +242,24 @@ class VaultCoordinationTests(unittest.TestCase):
         daily_output: Path,
     ) -> None:
         lifecycle.advance("fetching")
-        candidates = manifest.parent / "candidates.json"
-        candidates.write_text("[]\n", encoding="utf-8")
-        enriched = manifest.parent / "enriched.json"
-        enriched.write_text("[]\n", encoding="utf-8")
+        fetch_artifacts = []
+        filenames = {
+            "acquisition": "acquired-papers.json",
+            "acquisition-summary": "acquisition-summary.json",
+            "candidate-index": "candidate-index.json",
+            "approval-summary": "approval-summary.json",
+            "candidates": "candidates.json",
+            "enriched": "enriched.json",
+        }
+        for role, filename in filenames.items():
+            path = manifest.parent / filename
+            path.write_text(
+                "{}\n" if "summary" in role or role == "candidate-index" else "[]\n",
+                encoding="utf-8",
+            )
+            fetch_artifacts.append(run_lifecycle.ArtifactCandidate(role, path))
         lifecycle.checkpoint(
-            artifacts=[
-                run_lifecycle.ArtifactCandidate("candidates", candidates),
-                run_lifecycle.ArtifactCandidate("enriched", enriched),
-            ]
+            artifacts=fetch_artifacts
         )
         lifecycle.advance("reviewing")
         history = daily_output.parent / ".history.json"

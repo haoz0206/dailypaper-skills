@@ -29,8 +29,11 @@ DailyPaper Skills 将每日论文任务收敛为几条稳定的自然语言入�
 
 ## 功能
 
-- 从 Hugging Face Daily、Trending 和 arXiv 获取候选论文。
-- 按可配置关键词、arXiv 分类和阈值评分，生成“必读 / 值得看 / 可跳过”推荐。
+- 分页获取选定 arXiv 分类和日期窗口内的完整标题、摘要元数据；Hugging Face
+  Daily/Trending 为匹配论文补充信号，并在 arXiv 完整快照为空时提供有界 fallback。
+- 每篇论文生成独立候选 Markdown，由低成本 Subagent 逐篇完成
+  `approve / uncertain / reject` 语义审批；关键词不再硬过滤。
+- 对审批候选生成“必读 / 值得看 / 可跳过”推荐。
 - 阅读 arXiv、DOI、本地 PDF 或显式 Zotero 输入，生成结构化论文笔记。
 - 提取公式、Figure、Table、实验、方法局限和可复用概念。
 - 使用稳定 `paper_id` 去重；歧义匹配不会选择或覆盖已有笔记。
@@ -86,7 +89,7 @@ brew install poppler
 
 ```bash
 npx --yes skills@1.5.20 add \
-  "https://github.com/haoz0206/dailypaper-skills.git#v1.0.0" \
+  "https://github.com/haoz0206/dailypaper-skills.git#v1.1.0" \
   --skill configure-dailypaper daily-papers paper-reader generate-mocs \
   --agent claude-code codex \
   --global --yes
@@ -94,7 +97,7 @@ npx --yes skills@1.5.20 add \
 
 > [!NOTE]
 > 请先在 [GitHub Releases](https://github.com/haoz0206/dailypaper-skills/releases)
-> 确认 `v1.0.0` 已发布。tag 尚未发布时，上述命令不会成功；维护者测试或发布前验收
+> 确认 `v1.1.0` 已发布。tag 尚未发布时，上述命令不会成功；维护者测试或发布前验收
 > 应使用下面的开发 checkout。不要把 `main` 当作可复现的生产版本。
 
 安装器会在 `.agents/skills` 保存通用 Skill，并为支持的 harness 创建对应入口。
@@ -155,11 +158,11 @@ Linux 服务器推荐使用 `/workspace/dailypaper-vault`。Mac 可以配置不�
 | 配置项 | 说明 |
 | --- | --- |
 | `daily_papers.arxiv_categories` | arXiv API 的硬分类范围 |
-| `daily_papers.keywords` | 相关方向与加分关键词 |
-| `daily_papers.negative_keywords` | 命中后排除的关键词 |
-| `daily_papers.domain_boost_keywords` | 额外领域加分 |
-| `daily_papers.min_score` | 候选最低分 |
-| `daily_papers.top_n` | 单日推荐数量 |
+| `daily_papers.keywords` | 语义审批的正向研究信号 |
+| `daily_papers.negative_keywords` | 负向提示与扣分信号，不硬排除 |
+| `daily_papers.domain_boost_keywords` | 额外领域提示与加分 |
+| `daily_papers.min_score` | 防止模型假阴性的关键词救回阈值 |
+| `daily_papers.top_n` | 单日进入富化和主评审的最大数量 |
 | `automation.auto_refresh_indexes` | 写入后是否刷新 MOC |
 | `automation.git_commit` / `git_push` | 独立 Skill 的可选发布策略，必须同步开关 |
 
@@ -197,10 +200,12 @@ Mac 上若使用不同 Vault 路径，把上面的 `-C` 参数替换成该机器
 抓取窗口是不可变的 Run intent。同一天重复相同窗口可以幂等恢复；同一天改用不同
 窗口会返回 `intent-conflict`，不会复用另一份日报或自动取消现有任务。
 
-“今日”表示单日运行意图和目标日报日期，不是严格的自然日提交时间过滤。arXiv 的最新
-批次在周末、节假日或公告边界可能覆盖约 2–3 个日历日；单日模式保留该完整批次，再由
-历史记录去重。`过去3天` 和 `过去一周` 会应用明确的日期范围过滤。当前版本不提供
-“只接受目标自然日 submitted date”的严格当天模式。
+“今日”使用目标日期对应的 arXiv `submittedDate` 窗口；`过去3天` 和
+`过去一周` 使用相应的连续日期范围。抓取器根据 `totalResults` 完成分页并保存
+Run 级快照；网络失败、分页提前结束或超过安全上限时停止，不会把截断结果当成完整
+日报。周末或节假日没有新提交时，只有在 arXiv 空快照已被证明完整后才启用
+Hugging Face fallback。已有 acquisition/index 会按 hash 绑定优先恢复，不会为了
+resume 重新抓取动态数据并使已完成审批失效。
 
 ### 阅读论文
 

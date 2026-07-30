@@ -11,7 +11,7 @@ class ReleaseMetadataTests(unittest.TestCase):
     def test_readme_uses_versioned_install_and_preserves_attribution(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-        self.assertIn("dailypaper-skills.git#v1.0.0", readme)
+        self.assertIn("dailypaper-skills.git#v1.1.0", readme)
         self.assertIn("npx --yes skills@1.5.20 add", readme)
         self.assertIn("Node.js | 22.20.0+", readme)
         self.assertIn("GitHub Releases", readme)
@@ -24,8 +24,9 @@ class ReleaseMetadataTests(unittest.TestCase):
     def test_readme_documents_daily_semantics_and_safe_scheduling(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-        self.assertIn("不是严格的自然日提交时间过滤", readme)
-        self.assertIn("约 2–3 个日历日", readme)
+        self.assertIn("arXiv `submittedDate` 窗口", readme)
+        self.assertIn("根据 `totalResults` 完成分页", readme)
+        self.assertIn("不会把截断结果当成完整", readme)
         self.assertIn("Codex Scheduled tasks", readme)
         self.assertIn("Claude Code Routines", readme)
         self.assertIn("关闭 isolated worktree", readme)
@@ -50,14 +51,16 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertIn("not an official release", notice)
         self.assertIn("Apache", notice)
 
-    def test_first_release_has_a_changelog_entry(self) -> None:
+    def test_release_changelog_has_current_and_first_release_entries(self) -> None:
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
         self.assertIn("## [Unreleased]", changelog)
+        self.assertIn("## [1.1.0] - 2026-07-30", changelog)
         self.assertIn("## [1.0.0] - 2026-07-30", changelog)
         self.assertIn("installation", changelog)
         self.assertIn("acceptance, arXiv window semantics", changelog)
         self.assertIn("[1.0.0]:", changelog)
+        self.assertIn("[1.1.0]:", changelog)
 
     def test_release_workflow_is_tagged_main_only_and_regenerates_notes(self) -> None:
         workflow = (

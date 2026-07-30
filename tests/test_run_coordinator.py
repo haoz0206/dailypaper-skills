@@ -110,18 +110,30 @@ class RunCoordinatorTests(unittest.TestCase):
 
     def _advance_to_reviewing(self, manifest: Path) -> RunLifecycle:
         lifecycle = run_coordinator._open_lifecycle(manifest)
-        candidates = manifest.parent / "candidates.json"
-        candidates.write_text("[]\n", encoding="utf-8")
-        enriched = manifest.parent / "enriched.json"
-        enriched.write_text("[]\n", encoding="utf-8")
-        lifecycle.checkpoint(
-            artifacts=[
-                run_coordinator.ArtifactCandidate("candidates", candidates),
-                run_coordinator.ArtifactCandidate("enriched", enriched),
-            ]
-        )
+        lifecycle.checkpoint(artifacts=self._fetch_artifacts(manifest))
         lifecycle.advance("reviewing")
         return lifecycle
+
+    def _fetch_artifacts(self, manifest: Path):
+        artifacts = []
+        filenames = {
+            "acquisition": "acquired-papers.json",
+            "acquisition-summary": "acquisition-summary.json",
+            "candidate-index": "candidate-index.json",
+            "approval-summary": "approval-summary.json",
+            "candidates": "candidates.json",
+            "enriched": "enriched.json",
+        }
+        for role, filename in filenames.items():
+            path = manifest.parent / filename
+            path.write_text(
+                "{}\n"
+                if "summary" in role or role == "candidate-index"
+                else "[]\n",
+                encoding="utf-8",
+            )
+            artifacts.append(run_coordinator.ArtifactCandidate(role, path))
+        return artifacts
 
     def _review_report(self, manifest: Path) -> tuple[Path, set[str]]:
         recommendation = self.vault / "DailyPapers" / "today.md"
@@ -239,7 +251,7 @@ class RunCoordinatorTests(unittest.TestCase):
         manifest = Path(result["manifest"])
         self.assertTrue(manifest.exists())
         data = json.loads(manifest.read_text(encoding="utf-8"))
-        self.assertEqual(data["workflow_contract"]["version"], 2)
+        self.assertEqual(data["workflow_contract"]["version"], 3)
         self.assertEqual(data["window_days"], 7)
         self.assertEqual(result["window_days"], 7)
 
@@ -713,17 +725,10 @@ class RunCoordinatorTests(unittest.TestCase):
         ):
             ensure.side_effect = lambda opened, **_: opened.snapshot()
 
-            fetched = manifest.parent / "candidates.json"
-            fetched.write_text("[]\n", encoding="utf-8")
-            enriched = manifest.parent / "enriched.json"
-            enriched.write_text("[]\n", encoding="utf-8")
             first = run_coordinator.submit(
                 manifest,
                 result="success",
-                artifacts=[
-                    run_coordinator.ArtifactCandidate("candidates", fetched),
-                    run_coordinator.ArtifactCandidate("enriched", enriched),
-                ],
+                artifacts=self._fetch_artifacts(manifest),
             )
             self.assertEqual(first["phase"], "reviewing")
 
@@ -980,10 +985,7 @@ class RunCoordinatorTests(unittest.TestCase):
             ),
         ):
             ensure.side_effect = lambda opened, **_: opened.snapshot()
-            candidates = manifest.parent / "candidates.json"
-            candidates.write_text("[]\n", encoding="utf-8")
-            enriched = manifest.parent / "enriched.json"
-            enriched.write_text("[]\n", encoding="utf-8")
+            fetch_artifacts = self._fetch_artifacts(manifest)
             report = manifest.parent / "fetch-result.json"
             report.write_text(
                 json.dumps(
@@ -993,15 +995,11 @@ class RunCoordinatorTests(unittest.TestCase):
                         "result": "success",
                         "artifacts": [
                             {
-                                "role": "candidates",
+                                "role": artifact.role,
                                 "scope": "run",
-                                "path": "candidates.json",
-                            },
-                            {
-                                "role": "enriched",
-                                "scope": "run",
-                                "path": "enriched.json",
-                            },
+                                "path": artifact.path.name,
+                            }
+                            for artifact in fetch_artifacts
                         ],
                         "changed_paths": [],
                         "metadata": {"counts": {"candidates": 0}},
@@ -1016,7 +1014,18 @@ class RunCoordinatorTests(unittest.TestCase):
         self.assertEqual(result["phase"], "reviewing")
         data = json.loads(manifest.read_text(encoding="utf-8"))
         roles = {artifact["role"] for artifact in data["artifacts"].values()}
-        self.assertEqual(roles, {"fetch-report", "candidates", "enriched"})
+        self.assertEqual(
+            roles,
+            {
+                "fetch-report",
+                "acquisition",
+                "acquisition-summary",
+                "candidate-index",
+                "approval-summary",
+                "candidates",
+                "enriched",
+            },
+        )
 
     def test_submit_rejects_wrong_stage_and_escaping_report_paths(self) -> None:
         run_id = f"{TARGET_DATE}-bad-report"

@@ -157,7 +157,7 @@ class WorkflowContract:
 
 DAILY_WORKFLOW_CONTRACT = WorkflowContract(
     name="daily-papers",
-    version=2,
+    version=3,
     phases=(
         "prepared",
         "fetching",
@@ -167,7 +167,14 @@ DAILY_WORKFLOW_CONTRACT = WorkflowContract(
         "publishing",
     ),
     required_artifact_roles_by_phase={
-        "fetching": ("candidates", "enriched"),
+        "fetching": (
+            "acquisition",
+            "acquisition-summary",
+            "candidate-index",
+            "approval-summary",
+            "candidates",
+            "enriched",
+        ),
         "reviewing": ("recommendation", "history"),
         "writing-notes": ("daily-note",),
         "validated": ("daily-note",),

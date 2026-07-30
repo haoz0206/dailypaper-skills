@@ -346,8 +346,12 @@ branch followed by public-package synchronization.
 All four public Skills keep only portable `name` and `description` frontmatter
 and have no vendor-specific sidecar metadata. Their descriptions have
 non-overlapping primary trigger boundaries. When supported, `paper-reader`
-requests one Subagent through portable workflow instructions; otherwise it runs
-inline. Subagents never own the Vault lock, Manifest, task state, or Git
+requests one reading Subagent and daily fetch uses a bounded pool of low-cost
+Subagents for one-file-per-paper relevance approval; otherwise both run the
+same contracts inline. Relevance workers produce only hash-bound Evaluation v1
+files. A resumed fetch reuses a valid candidate index, then a hash-bound
+acquisition pair, before considering a new network fetch; this ordering is
+identical across Harnesses. Subagents never own the Vault lock, Manifest, task state, or Git
 publication. Both Harnesses call the same Python Run Coordinator and Vault
 coordination scripts; they do not reimplement lifecycle or Git safety in
 natural-language instructions.

@@ -135,6 +135,12 @@ class HarnessContractTests(unittest.TestCase):
         self.assertIn("等待其", notes)
 
     def test_subagent_behavior_degrades_to_inline_execution(self) -> None:
+        fetch = (SUITE_ROOT / "workflows" / "fetch.md").read_text(
+            encoding="utf-8"
+        )
+        relevance_approval = (
+            SUITE_ROOT / "references" / "relevance-approval.md"
+        ).read_text(encoding="utf-8")
         paper_reader = (SUITE_ROOT / "workflows" / "paper-reader.md").read_text(
             encoding="utf-8"
         )
@@ -150,6 +156,15 @@ class HarnessContractTests(unittest.TestCase):
         self.assertIn("不支持 Subagent", paper_reader)
         self.assertIn("只让它读取并执行 `reading-core.md`", paper_reader)
         self.assertNotIn("Subagent", reading_core)
+        self.assertIn("candidate_approval.py", fetch)
+        self.assertIn("references/relevance-approval.md", fetch)
+        self.assertIn("不支持 Subagent", fetch)
+        self.assertIn("最多同时运行 8 个", relevance_approval)
+        self.assertIn("低成本、快速模型", relevance_approval)
+        self.assertIn("approve", relevance_approval)
+        self.assertIn("uncertain", relevance_approval)
+        self.assertIn("reject", relevance_approval)
+        self.assertIn("不得退回关键词硬过滤", relevance_approval)
 
     def test_paper_reading_core_has_two_real_adapters(self) -> None:
         standalone = (

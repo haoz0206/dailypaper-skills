@@ -81,6 +81,10 @@ not the canonical user interface.
 - `skills/daily-papers/scripts/shared/runtime_context.py`: strict one-shot
   machine/shared configuration resolver. Daily entry creates one immutable
   Runtime Context and passes it to all internal stages.
+- `skills/daily-papers/scripts/daily/candidate_approval.py`: the model-agnostic
+  relevance-approval seam. It materializes one immutable Markdown per acquired
+  paper, reports missing Evaluation v1 files, validates their paper/input
+  binding, and collects the bounded enrichment pool.
 - `skills/daily-papers/scripts/shared/config_schema.py`: the only configuration
   schema, overlay, normalization, and fingerprint implementation. All config
   consumers go through `user_config.load_user_config()` or this module.
@@ -144,10 +148,18 @@ only when unique, and ambiguity must never select or overwrite a note.
   not implement another budget state machine. One logical fetch/enrichment
   phase reuses one budget across endpoints, retries, and concurrent workers;
   the shared budget performs atomic byte accounting.
-- Daily acquisition accepts a 1-31 day window. Enrichment rejects excessive
-  paper counts and creates at most one semaphore-sized batch of asyncio tasks
-  at a time; a semaphore alone is not permission to materialize one task per
-  untrusted input item.
+- Daily acquisition accepts a 1-31 day window. arXiv category/date acquisition
+  must page against `totalResults`, respect the shared fetch budget and request
+  delay, and fail closed when completeness cannot be proved. A non-empty arXiv
+  snapshot is the authoritative acquired set; HF may enrich matching IDs and
+  becomes a bounded fallback only when that snapshot is proven empty.
+  Deterministic keyword or history signals never remove an acquired arXiv paper
+  before per-paper approval. The acquisition summary binds the complete scope
+  and acquired bytes; resume reuses a valid candidate index first, then a bound
+  acquisition pair, and only then performs a new network fetch. Enrichment rejects
+  excessive paper counts and creates at most one semaphore-sized batch of
+  asyncio tasks at a time; a semaphore alone is not permission to materialize
+  one task per untrusted input item.
 - Untrusted document tools such as `pdftotext` and `pdfimages` must use
   `safe_process.run_bounded_tool`; do not add direct `subprocess.run`,
   `Popen`, or async subprocess capture paths for them.
@@ -277,9 +289,12 @@ only when unique, and ambiguity must never select or overwrite a note.
   upstream release.
 - Harness identity is selected at runtime (`claude-code` or `codex`), never by
   switching the skills Git branch.
-- Prompt-level Subagent delegation must degrade to inline execution. Subagents
-  only produce artifact candidates and progress reports; they never mutate the
-  Manifest, guardian lock, Vault ownership, or Git publication.
+- Prompt-level Subagent delegation must degrade to inline execution. Relevance
+  approval uses one logical task per candidate Markdown and a bounded worker
+  pool, preferring a low-cost model when the Harness exposes model choice.
+  Subagents only produce Evaluation v1 files, artifact candidates, and progress
+  reports; they never mutate the Manifest, guardian lock, Vault ownership, or
+  Git publication.
 - Public Skill prompts use progressive disclosure. `paper-reader` and
   `generate-mocs` route independent calls to the bundled
   `references/standalone-session.md`; do not duplicate coordinator command

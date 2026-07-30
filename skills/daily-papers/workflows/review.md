@@ -97,15 +97,14 @@ python3 "{SKILL_ROOT}/scripts/shared/paper_identity.py" match \
 **来源格式规则**（按 source 字段分别显示）：
 - `hf-daily` → `📰 HF Daily，⬆️ {hf_upvotes}`
 - `hf-trending` → 🔥 HF Trending，⬆️ {hf_upvotes}`
-- `arxiv` → `📄 arXiv 关键词检索`（不显示 upvotes，因为没有）
+- `arxiv` → `📄 arXiv 分类全集 + 语义审批`（不显示 upvotes，因为没有）
 
 #### 兜底过滤
 
-写评过程中如果发现某篇论文与 embodied AI / world model / diffusion for robotics
-完全无关（如医学影像、天气预报、语音合成、纯 LLM agent、纯 NLP、GUI agent
-等），直接跳过不写。**补货规则**：从完整的已富化论文中按 score 顺序选取，跳过
-不相关的，直到凑满 20 篇或候选池耗尽。如果候选池已空，有多少写多少。在末尾
-「被排除的论文」一节注明被跳过的论文标题和跳过原因。
+优先读取每篇的 `approval`，特别复核 `uncertain` 和 `keyword-rescue`。写评过程中
+如果富化信息证明某篇与研究方向完全无关，可以跳过不写；从完整已富化候选中按
+审批相关度继续补充，直到凑满 20 篇或候选池耗尽。不得仅因没有命中关键词而跳过。
+在末尾「被排除的论文」一节注明标题和基于语义内容的具体原因。
 
 #### 铁律：基于事实评价
 

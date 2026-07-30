@@ -108,7 +108,8 @@
    写入 `RUN_MANIFEST` 的父目录，不得修改 Manifest、Git 或 Vault Task State。
    父流程只把报告交给 Coordinator：
 
-   - fetch 写 `fetch-result.json`，包含 `candidates`、`enriched`。
+   - fetch 写 `fetch-result.json`，包含完整 acquisition、candidate index、
+     approval summary、`candidates` 和 `enriched`。
    - review 写 `review-result.json`，包含推荐页、history 和 Vault changed paths。
    - notes 每完成并验证一篇论文，写唯一的 `notes-progress-<序号>.json`；
      `progress` 只保存详细 checkpoint，不推进 phase。
@@ -147,8 +148,8 @@
 ## 重要约束
 
 - 当前入口始终负责 Vault bootstrap、Run Coordinator、`RUN_MANIFEST`、最终验证和 Git
-  发布；不得把整个日报编排委派给 Subagent。只有逐篇论文阅读可以按
-  `paper-reader` 的约定委派，父流程必须等待并逐篇验证。
+  发布；不得把整个日报编排委派给 Subagent。只有逐篇相关度审批和逐篇论文阅读
+  可以按各自 reference 的约定委派，父流程必须等待并逐篇验证。
 - 不要先要求用户手动跑 `跑一下论文抓取 / 点评 / 笔记`。
 - 三个内部阶段不是用户入口，不得把直接用户请求转交给它们。维护者需要单阶段
   调试时，也必须显式提供已取得所有权的 `RUN_MANIFEST`。

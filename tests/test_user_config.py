@@ -50,6 +50,9 @@ class UserConfigTests(unittest.TestCase):
                 {
                     "DAILYPAPER_CONFIG": str(config_path),
                     "DAILYPAPER_WORKSPACE": str(workspace),
+                    "DAILYPAPER_MACHINE_CONFIG": str(
+                        workspace / "missing-machine-config.json"
+                    ),
                 },
                 clear=False,
             ):

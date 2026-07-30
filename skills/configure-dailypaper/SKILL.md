@@ -122,11 +122,12 @@ python3 "{SKILL_ROOT}/scripts/configure/config_manager.py" \
 
 - `arxiv_categories`：arXiv API 的硬抓取分类范围，分类之间使用 OR；它不限制
   HuggingFace Daily/Trending 来源。
-- `keywords`：抓取后的正向评分；标题命中权重大于摘要。
-- `negative_keywords`：标题或摘要命中后硬排除。
-- `domain_boost_keywords`：领域相关性加分。
-- `min_score`：最终候选最低分。
-- `top_n`：每天保留数量；当前多日调用会乘以天数。
+- `keywords`：提供给逐篇语义审批的正向研究信号；标题命中权重大于摘要。
+- `negative_keywords`：负向提示和扣分信号，不再硬排除论文。
+- `domain_boost_keywords`：领域相关性提示和加分信号。
+- `min_score`：关键词救回阈值；达到该值的论文即使被低成本模型误判为 reject，
+  仍进入主评审候选。
+- `top_n`：每天最多进入 HTML/PDF 富化和主评审的数量；多日调用会乘以天数。
 - `auto_refresh_indexes`：写入后是否刷新 Obsidian MOC。
 - `git_commit` / `git_push`：共同控制独立调用 `paper-reader` /
   `generate-mocs` 是否通过可恢复发布事务精确提交并普通 push；不影响协调式
@@ -135,7 +136,6 @@ python3 "{SKILL_ROOT}/scripts/configure/config_manager.py" \
 
 当前不支持的请求必须如实报告，禁止写入不会生效的字段。包括：
 
-- 严格 calendar-day arXiv 模式
 - 自定义 arXiv API 查询表达式
 - 自定义每次 API `max_results`
 - 多日调用固定总 `top_n`
@@ -211,11 +211,12 @@ python3 "{SKILL_ROOT}/scripts/configure/config_manager.py" \
 
 ## 配置原则
 
-- 缩小真正的网络抓取范围优先修改 `arxiv_categories`；关键词只影响抓取后的筛选。
+- 缩小真正的网络抓取范围优先修改 `arxiv_categories`；关键词只影响逐篇审批提示、
+  排序和救回。
 - 用户说“只抓这些分类”时，明确说明分类限制只作用于 arXiv；当前合并候选仍包含
   HuggingFace 来源。
-- 不要仅因用户说“更严格”就猜测字段；根据当前命中逻辑说明
-  `negative_keywords`、`min_score` 和分类收窄的不同影响。
+- 不要仅因用户说“更严格”就猜测字段；根据当前逻辑说明负向提示、
+  `min_score` 关键词救回和分类收窄的不同影响。
 - 共享数组 patch 会替换整个数组。保留用户仍然需要的旧值，不要只写新增项。
 - Zotero 数据库和服务器绝对路径属于 per-machine 配置，不写入共享 Vault。
 - repository、稳定输出目录和任务状态文件不是本 Skill 的可配置项。

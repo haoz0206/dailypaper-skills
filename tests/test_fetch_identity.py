@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
 
@@ -28,6 +29,16 @@ SPEC = importlib.util.spec_from_file_location("fetch_identity_under_test", MODUL
 assert SPEC and SPEC.loader
 fetch_and_score = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(fetch_and_score)
+
+
+def arxiv_feed(entries: str = "", *, total: int = 0) -> str:
+    return f"""\
+<feed xmlns="http://www.w3.org/2005/Atom"
+      xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">
+  <opensearch:totalResults>{total}</opensearch:totalResults>
+{entries}
+</feed>
+"""
 
 
 class FetchIdentityTests(unittest.TestCase):
@@ -95,7 +106,7 @@ class FetchIdentityTests(unittest.TestCase):
         with patch.object(
             fetch_and_score,
             "fetch_url",
-            return_value="",
+            side_effect=["", "", arxiv_feed()],
         ) as fetch:
             fetch_and_score.fetch_hf_papers(
                 target,
@@ -139,28 +150,29 @@ class FetchIdentityTests(unittest.TestCase):
         ):
             papers = fetch_and_score.fetch_hf_papers()
 
-        self.assertEqual(len(papers), 1)
-        self.assertEqual(papers[0]["paper_id"], f"arxiv:{valid_id}")
-        self.assertEqual(papers[0]["title"], "")
-        self.assertEqual(papers[0]["abstract"], "")
-        self.assertEqual(papers[0]["hf_upvotes"], 0)
+        self.assertEqual(papers, [])
 
-    def test_arxiv_fetch_skips_entries_with_empty_required_text(self) -> None:
-        xml = """\
-<feed xmlns="http://www.w3.org/2005/Atom">
+    def test_arxiv_fetch_rejects_entries_with_empty_required_text(self) -> None:
+        xml = arxiv_feed(
+            """\
   <entry>
     <title />
     <summary />
     <id>https://arxiv.org/abs/2607.00001</id>
   </entry>
-</feed>
-"""
+""",
+            total=1,
+        )
         with patch.object(
             fetch_and_score,
             "fetch_url",
             return_value=xml,
         ):
-            self.assertEqual(fetch_and_score.fetch_arxiv_papers(), [])
+            with self.assertRaisesRegex(
+                fetch_and_score.ArxivFetchError,
+                "omitted title or abstract",
+            ):
+                fetch_and_score.fetch_arxiv_papers()
 
     def test_arxiv_response_cannot_exceed_the_requested_entry_count(self) -> None:
         entry = """\
@@ -170,17 +182,19 @@ class FetchIdentityTests(unittest.TestCase):
     <id>https://arxiv.org/abs/2607.00001</id>
   </entry>
 """
-        xml = (
-            '<feed xmlns="http://www.w3.org/2005/Atom">\n'
-            + entry
-            + entry.replace("2607.00001", "2607.00002")
-            + "</feed>"
+        xml = arxiv_feed(
+            entry + entry.replace("2607.00001", "2607.00002"),
+            total=2,
         )
         with (
-            patch.object(fetch_and_score, "ARXIV_RESULTS_PER_DAY", 1),
+            patch.object(fetch_and_score, "ARXIV_PAGE_SIZE", 1),
             patch.object(fetch_and_score, "fetch_url", return_value=xml),
         ):
-            self.assertEqual(fetch_and_score.fetch_arxiv_papers(days=1), [])
+            with self.assertRaisesRegex(
+                fetch_and_score.ArxivFetchError,
+                "more entries than requested",
+            ):
+                fetch_and_score.fetch_arxiv_papers(days=1)
 
     def test_arxiv_xml_rejects_dtd_before_standard_parser(self) -> None:
         payload = """\
@@ -194,14 +208,80 @@ class FetchIdentityTests(unittest.TestCase):
             patch.object(fetch_and_score, "fetch_url", return_value=payload),
             patch.object(fetch_and_score.ET, "fromstring") as parser,
         ):
-            result = fetch_and_score.fetch_arxiv_papers(
+            with self.assertRaisesRegex(
+                fetch_and_score.ArxivFetchError,
+                "forbidden DTD",
+            ):
+                fetch_and_score.fetch_arxiv_papers(
+                    date(2026, 7, 29),
+                    date(2026, 7, 29),
+                    days=1,
+                )
+        parser.assert_not_called()
+
+    def test_arxiv_fetch_pages_complete_category_date_snapshot(self) -> None:
+        first = """\
+  <entry>
+    <title>First Robot Paper</title>
+    <summary>A robot world model.</summary>
+    <published>2026-07-29T01:00:00Z</published>
+    <id>https://arxiv.org/abs/2607.00001v2</id>
+    <category term="cs.RO" />
+    <arxiv:primary_category xmlns:arxiv="http://arxiv.org/schemas/atom" term="cs.RO" />
+  </entry>
+"""
+        second = first.replace("First", "Second").replace(
+            "2607.00001v2",
+            "2607.00002",
+        )
+        responses = [arxiv_feed(first, total=2), arxiv_feed(second, total=2)]
+        urls = []
+
+        def fetch(url, **_kwargs):
+            urls.append(url)
+            return responses.pop(0)
+
+        with (
+            patch.object(fetch_and_score, "ARXIV_PAGE_SIZE", 1),
+            patch.object(fetch_and_score, "fetch_url", side_effect=fetch),
+        ):
+            snapshot = {}
+            papers = fetch_and_score.fetch_arxiv_papers(
                 date(2026, 7, 29),
                 date(2026, 7, 29),
-                days=1,
+                sleep=lambda _seconds: None,
+                snapshot=snapshot,
             )
 
-        self.assertEqual(result, [])
-        parser.assert_not_called()
+        self.assertEqual([paper["paper_id"] for paper in papers], [
+            "arxiv:2607.00001",
+            "arxiv:2607.00002",
+        ])
+        starts = [
+            parse_qs(urlparse(url).query)["start"][0]
+            for url in urls
+        ]
+        self.assertEqual(starts, ["0", "1"])
+        query = parse_qs(urlparse(urls[0]).query)["search_query"][0]
+        self.assertIn("cat:cs.RO", query)
+        self.assertIn("submittedDate:[202607290000 TO 202607292359]", query)
+        self.assertEqual(snapshot["query_total"], 2)
+        self.assertEqual(snapshot["parsed"], 2)
+        self.assertTrue(snapshot["complete"])
+
+    def test_negative_keywords_are_signals_not_hard_rejections(self) -> None:
+        paper = {
+            "title": "Robot policy for medical imaging",
+            "abstract": "A robot manipulation method.",
+        }
+        with (
+            patch.object(fetch_and_score, "KEYWORDS", ["robot"]),
+            patch.object(fetch_and_score, "DOMAIN_BOOST_KEYWORDS", []),
+            patch.object(fetch_and_score, "NEGATIVE_KEYWORDS", ["medical imaging"]),
+        ):
+            score = fetch_and_score.score_paper(paper)
+
+        self.assertNotEqual(score, -999)
 
     def test_frozen_runtime_context_configures_fetch_without_shared_reread(
         self,
@@ -363,6 +443,95 @@ class FetchIdentityTests(unittest.TestCase):
 
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0]["title"], "Second")
+
+    def test_arxiv_snapshot_keeps_every_paper_before_history_selection(self) -> None:
+        papers = []
+        for index in range(22):
+            arxiv_id = f"2607.{index:05d}"
+            papers.append(
+                {
+                    "paper_id": f"arxiv:{arxiv_id}",
+                    "arxiv_id": arxiv_id,
+                    "title": f"Paper {index}",
+                    "abstract": "robot learning",
+                    "url": f"https://arxiv.org/abs/{arxiv_id}",
+                    "score": index,
+                    "source": "arxiv",
+                }
+            )
+        seen_id = papers[0]["arxiv_id"]
+        with (
+            patch.object(
+                fetch_and_score,
+                "load_history",
+                return_value=[{"id": seen_id, "date": "2026-07-28"}],
+            ),
+            patch.object(fetch_and_score, "load_fallback_ids", return_value=set()),
+        ):
+            merged = fetch_and_score.merge_and_dedup(
+                [],
+                papers,
+                date(2026, 7, 29),
+                top_n=None,
+            )
+
+        self.assertEqual(len(merged), len(papers))
+        seen = next(paper for paper in merged if paper["arxiv_id"] == seen_id)
+        self.assertTrue(seen["is_re_recommend"])
+        self.assertFalse(seen["daily_selection_eligible"])
+
+    def test_hf_only_papers_do_not_expand_nonempty_arxiv_snapshot(self) -> None:
+        arxiv = {
+            "paper_id": "arxiv:2607.00001",
+            "arxiv_id": "2607.00001",
+            "title": "Scoped arXiv paper",
+            "abstract": "robot learning",
+            "url": "https://arxiv.org/abs/2607.00001",
+            "score": 1,
+            "source": "arxiv",
+        }
+        hf_only = {
+            "paper_id": "arxiv:2607.99999",
+            "arxiv_id": "2607.99999",
+            "title": "HF-only paper",
+            "abstract": "unscoped",
+            "url": "https://arxiv.org/abs/2607.99999",
+            "score": 99,
+            "source": "hf-trending",
+            "hf_upvotes": 100,
+        }
+
+        merged = fetch_and_score.merge_and_dedup(
+            [hf_only],
+            [arxiv],
+            date(2026, 7, 29),
+            days=2,
+            top_n=None,
+        )
+
+        self.assertEqual([paper["paper_id"] for paper in merged], [arxiv["paper_id"]])
+
+    def test_hf_is_bounded_fallback_for_proven_empty_arxiv_snapshot(self) -> None:
+        hf = {
+            "paper_id": "arxiv:2607.99999",
+            "arxiv_id": "2607.99999",
+            "title": "Weekend paper",
+            "abstract": "robot learning",
+            "url": "https://arxiv.org/abs/2607.99999",
+            "score": 7,
+            "source": "hf-trending",
+            "hf_upvotes": 10,
+        }
+
+        merged = fetch_and_score.merge_and_dedup(
+            [hf],
+            [],
+            date(2026, 8, 1),
+            days=2,
+            top_n=None,
+        )
+
+        self.assertEqual([paper["paper_id"] for paper in merged], [hf["paper_id"]])
 
     def test_fallback_history_is_anchored_to_the_run_target_date(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

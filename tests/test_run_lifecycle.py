@@ -544,11 +544,18 @@ class RunLifecycleTests(unittest.TestCase):
 
     def test_canonical_contract_has_required_artifacts_and_fingerprint(self) -> None:
         contract = run_lifecycle.DAILY_WORKFLOW_CONTRACT.as_dict()
-        self.assertEqual(contract["version"], 2)
+        self.assertEqual(contract["version"], 3)
         self.assertIn("sha256", contract)
         self.assertEqual(
             contract["required_artifact_roles_by_phase"]["fetching"],
-            ["candidates", "enriched"],
+            [
+                "acquisition",
+                "acquisition-summary",
+                "approval-summary",
+                "candidate-index",
+                "candidates",
+                "enriched",
+            ],
         )
 
 

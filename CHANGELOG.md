@@ -9,9 +9,29 @@ as breaking changes.
 
 ## [Unreleased]
 
+- Nothing yet.
+
+## [1.1.0] - 2026-07-30
+
 ### Added
 
-- Nothing yet.
+- One-file-per-paper candidate Markdown and Evaluation v1 relevance approvals
+  with bounded low-cost Subagent delegation and hash-bound resume.
+- Complete bounded arXiv category/date pagination using `totalResults`, with
+  explicit failure when a snapshot is truncated or cannot be proved complete.
+
+### Changed
+
+- Keywords, negative keywords, and domain boosts are now semantic-review,
+  ranking, and false-negative rescue signals instead of acquisition-time hard
+  filters.
+- History dedup now marks post-approval selection eligibility instead of
+  removing papers before semantic review. Non-empty arXiv snapshots are
+  authoritative; Hugging Face supplies matching signals or a proven-empty
+  snapshot fallback.
+- Fetch resume now reuses hash-bound candidate/acquisition artifacts before any
+  new network request, so dynamic source changes cannot invalidate completed
+  evaluations.
 
 ## [1.0.0] - 2026-07-30
 
@@ -78,5 +98,6 @@ First formal release of the maintained unified-harness derivative.
   [huangkiki/dailypaper-skills](https://github.com/huangkiki/dailypaper-skills)
   under Apache-2.0. See `NOTICE`.
 
-[Unreleased]: https://github.com/haoz0206/dailypaper-skills/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/haoz0206/dailypaper-skills/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/haoz0206/dailypaper-skills/releases/tag/v1.1.0
 [1.0.0]: https://github.com/haoz0206/dailypaper-skills/releases/tag/v1.0.0

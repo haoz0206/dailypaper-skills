@@ -1,26 +1,29 @@
 #!/usr/bin/env python3
 """
-fetch_and_score.py — Phase 1+2: Fetch, score, merge, dedup, select top 30.
+fetch_and_score.py — Acquire complete arXiv metadata and deterministic signals.
 
-Replaces the LLM orchestration step with pure Python. Zero token cost.
+This stage deliberately does not make a relevance decision.  Every paper in
+the bounded category/date query remains available for semantic approval.
 
 Usage:
     python3 fetch_and_score.py --output /path/to/candidates.json
     python3 fetch_and_score.py --date 2026-02-25 --output /path/to/candidates.json
     python3 fetch_and_score.py --days 7 --output /path/to/candidates.json
 
-Stderr: progress logs.  Stdout: JSON array of top papers (30 * days).
+Stderr: progress logs.  Stdout: JSON array of acquired papers.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
+import time
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta
-from itertools import islice
 from pathlib import Path
+from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 _SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
@@ -61,8 +64,10 @@ MAX_RECOMMENDATION_BYTES = 16 * 1024 * 1024
 MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 MAX_FETCH_DAYS = 31
 MAX_HF_ITEMS_PER_RESPONSE = 1_000
-ARXIV_RESULTS_PER_DAY = 400
+ARXIV_PAGE_SIZE = 500
 MAX_ARXIV_RESULTS = 3_000
+MAX_ACQUIRED_PAPERS = 3_200
+ARXIV_PAGE_DELAY_SECONDS = 3.0
 MAX_TOTAL_FETCH_BYTES = 96 * 1024 * 1024
 FETCH_REQUEST_TIMEOUT_SECONDS = 60
 FETCH_RUN_TIMEOUT_SECONDS = 10 * 60
@@ -70,12 +75,17 @@ FETCH_RUN_TIMEOUT_SECONDS = 10 * 60
 ATOM_NS = {
     "atom": "http://www.w3.org/2005/Atom",
     "arxiv": "http://arxiv.org/schemas/atom",
+    "opensearch": "http://a9.com/-/spec/opensearch/1.1/",
 }
 HTTP_CLIENT = SafeHTTPClient()
 
 
 class RuntimeContextError(ValueError):
     """The coordinator-frozen runtime context is missing or invalid."""
+
+
+class ArxivFetchError(RuntimeError):
+    """A complete bounded arXiv metadata snapshot could not be acquired."""
 
 
 def configure_runtime_context(path: Path) -> str:
@@ -147,14 +157,9 @@ def score_paper(paper: dict, is_trending: bool = False) -> int:
     text = (paper["title"] + " " + paper["abstract"]).lower()
     title_lower = paper["title"].lower()
 
-    # 1. Negative keywords → instant reject
-    for neg in NEGATIVE_KEYWORDS:
-        if neg in text:
-            return -999
-
     score = 0
 
-    # 2. Positive keywords
+    # 1. Positive keywords
     keyword_hits = 0
     for kw in KEYWORDS:
         if kw in title_lower:
@@ -164,12 +169,16 @@ def score_paper(paper: dict, is_trending: bool = False) -> int:
             score += 1
             keyword_hits += 1
 
-    # 3. Domain boost
+    # 2. Domain boost
     domain_hits = sum(1 for kw in DOMAIN_BOOST_KEYWORDS if kw in text)
     if domain_hits >= 2:
         score += 2
     elif domain_hits == 1:
         score += 1
+
+    # 3. Negative keywords are a signal, never an acquisition-time veto.
+    negative_hits = sum(1 for keyword in NEGATIVE_KEYWORDS if keyword in text)
+    score -= min(negative_hits, 3) * 3
 
     # 4. Trending boost (HF sources only)
     #    GATE: only apply if paper has at least 1 keyword or domain match,
@@ -262,6 +271,10 @@ def _parse_hf_item(item: dict, source: str) -> tuple[str, dict] | None:
     title = title if isinstance(title, str) else ""
     summary = summary if isinstance(summary, str) else ""
     published_at = published_at if isinstance(published_at, str) else ""
+    title = " ".join(title.split())
+    summary = " ".join(summary.split())
+    if not title or not summary:
+        return None
 
     paper = {
         "paper_id": f"arxiv:{arxiv_id}",
@@ -281,9 +294,6 @@ def _parse_hf_item(item: dict, source: str) -> tuple[str, dict] | None:
 
     is_trending = source == "hf-trending"
     paper["score"] = score_paper(paper, is_trending=is_trending)
-
-    if paper["score"] < 0:
-        return None
 
     return arxiv_id, paper
 
@@ -406,136 +416,182 @@ def fetch_arxiv_papers(
     *,
     client: SafeHTTPClient | None = None,
     budget: FetchBudget | None = None,
+    sleep=time.sleep,
+    snapshot: dict | None = None,
 ) -> list[dict]:
-    max_results = min(ARXIV_RESULTS_PER_DAY * days, MAX_ARXIV_RESULTS)
-    cats = "+OR+".join(f"cat:{c}" for c in ARXIV_CATEGORIES)
-    url = (
-        f"https://export.arxiv.org/api/query?"
-        f"search_query=({cats})"
-        f"&sortBy=submittedDate&sortOrder=descending&max_results={max_results}"
+    if start_date is None or end_date is None:
+        end_date = date.today()
+        start_date = end_date - timedelta(days=days - 1)
+    category_query = " OR ".join(f"cat:{category}" for category in ARXIV_CATEGORIES)
+    date_query = (
+        f"submittedDate:[{start_date:%Y%m%d}0000 TO {end_date:%Y%m%d}2359]"
     )
-
+    search_query = f"({category_query}) AND {date_query}"
     timeout = max(60, 30 * days)
-    print(f"  Fetching arXiv (max_results={max_results}, timeout={timeout}s)...", file=sys.stderr)
-    xml_text = fetch_url(
-        url,
-        timeout=timeout,
-        client=client,
-        budget=budget,
-    )
-    if not xml_text:
-        return []
-
-    if re.search(r"<!\s*(?:DOCTYPE|ENTITY)\b", xml_text, flags=re.IGNORECASE):
-        print(
-            "  [WARN] arXiv XML rejected a DTD or entity declaration",
-            file=sys.stderr,
-        )
-        return []
-    try:
-        # Atom needs no DTD; declarations were rejected above before this
-        # bounded standard-library parse.
-        root = ET.fromstring(xml_text)  # noqa: S314
-    except ET.ParseError as e:
-        print(f"  [WARN] arXiv XML parse error: {e}", file=sys.stderr)
-        return []
-
-    entries = list(
-        islice(
-            root.iterfind("atom:entry", ATOM_NS),
-            max_results + 1,
-        )
-    )
-    if len(entries) > max_results:
-        print(
-            "  [WARN] arXiv response contains more entries than requested",
-            file=sys.stderr,
-        )
-        return []
-
     papers = []
-    filtered_by_date = 0
-    for entry in entries:
-        title_el = entry.find("atom:title", ATOM_NS)
-        summary_el = entry.find("atom:summary", ATOM_NS)
-        published_el = entry.find("atom:published", ATOM_NS)
-        id_el = entry.find("atom:id", ATOM_NS)
-
-        if (
-            title_el is None
-            or not title_el.text
-            or summary_el is None
-            or not summary_el.text
-        ):
-            continue
-
-        title = " ".join(title_el.text.split())
-        abstract = " ".join(summary_el.text.split())
-        entry_url = (
-            id_el.text.strip()
-            if id_el is not None and id_el.text
-            else ""
+    seen_arxiv_ids: set[str] = set()
+    offset = 0
+    total_results: int | None = None
+    while total_results is None or offset < total_results:
+        page_size = min(ARXIV_PAGE_SIZE, MAX_ARXIV_RESULTS - offset)
+        if page_size <= 0:
+            raise ArxivFetchError(
+                f"arXiv query exceeds the {MAX_ARXIV_RESULTS}-paper safety limit"
+            )
+        url = "https://export.arxiv.org/api/query?" + urlencode(
+            {
+                "search_query": search_query,
+                "start": offset,
+                "max_results": page_size,
+                "sortBy": "submittedDate",
+                "sortOrder": "ascending",
+            }
         )
-        date = (
-            published_el.text[:10]
-            if published_el is not None and published_el.text
-            else ""
+        print(
+            f"  Fetching arXiv page start={offset}, max_results={page_size}...",
+            file=sys.stderr,
         )
-        arxiv_id = canonical_arxiv_id(entry_url) or ""
-        if not arxiv_id:
-            continue
+        xml_text = fetch_url(
+            url,
+            timeout=timeout,
+            client=client,
+            budget=budget,
+        )
+        if not xml_text:
+            raise ArxivFetchError(
+                f"arXiv page at offset {offset} could not be fetched"
+            )
+        if re.search(r"<!\s*(?:DOCTYPE|ENTITY)\b", xml_text, flags=re.IGNORECASE):
+            raise ArxivFetchError(
+                "arXiv XML contains a forbidden DTD or entity declaration"
+            )
+        try:
+            root = ET.fromstring(xml_text)  # noqa: S314
+        except ET.ParseError as exc:
+            raise ArxivFetchError(f"arXiv XML parse error: {exc}") from exc
+        total_element = root.find("opensearch:totalResults", ATOM_NS)
+        if total_element is None or total_element.text is None:
+            raise ArxivFetchError("arXiv response omitted totalResults")
+        try:
+            page_total = int(total_element.text.strip(), 10)
+        except ValueError as exc:
+            raise ArxivFetchError("arXiv totalResults is not an integer") from exc
+        if page_total < 0:
+            raise ArxivFetchError("arXiv totalResults must not be negative")
+        if total_results is None:
+            total_results = page_total
+            if total_results > MAX_ARXIV_RESULTS:
+                raise ArxivFetchError(
+                    f"arXiv query returned {total_results} papers, exceeding "
+                    f"the {MAX_ARXIV_RESULTS}-paper safety limit"
+                )
+        elif page_total != total_results:
+            raise ArxivFetchError("arXiv totalResults changed during pagination")
 
-        # Date filter: only apply in multi-day mode (days > 1)
-        # In single-day mode, arXiv batches span 2-3 days, so filtering would be too strict
-        if days > 1 and start_date and end_date and date:
-            try:
-                pub_date = datetime.strptime(date, "%Y-%m-%d").date()
-                if pub_date < start_date or pub_date > end_date:
-                    filtered_by_date += 1
-                    continue
-            except ValueError:
-                pass  # keep papers with unparseable dates
+        entries = list(root.findall("atom:entry", ATOM_NS))
+        if len(entries) > page_size:
+            raise ArxivFetchError(
+                "arXiv response contains more entries than requested"
+            )
+        if not entries and offset < total_results:
+            raise ArxivFetchError(
+                f"arXiv pagination ended early at {offset} of {total_results}"
+            )
+        for entry in entries:
+            title_el = entry.find("atom:title", ATOM_NS)
+            summary_el = entry.find("atom:summary", ATOM_NS)
+            published_el = entry.find("atom:published", ATOM_NS)
+            id_el = entry.find("atom:id", ATOM_NS)
 
-        author_els = entry.findall("atom:author", ATOM_NS)
-        names = []
-        affiliations = set()
-        for a in author_els:
-            name_el = a.find("atom:name", ATOM_NS)
-            if name_el is not None and name_el.text:
-                names.append(name_el.text.strip())
-            for aff_el in a.findall("arxiv:affiliation", ATOM_NS):
-                if aff_el.text and aff_el.text.strip():
-                    affiliations.add(aff_el.text.strip())
+            if (
+                title_el is None
+                or not title_el.text
+                or summary_el is None
+                or not summary_el.text
+            ):
+                raise ArxivFetchError(
+                    f"arXiv entry at offset {offset} omitted title or abstract"
+                )
 
-        cat_el = entry.find("arxiv:primary_category", ATOM_NS)
-        category = cat_el.get("term", "") if cat_el is not None else ""
+            title = " ".join(title_el.text.split())
+            abstract = " ".join(summary_el.text.split())
+            entry_url = (
+                id_el.text.strip()
+                if id_el is not None and id_el.text
+                else ""
+            )
+            published_date = (
+                published_el.text[:10]
+                if published_el is not None and published_el.text
+                else ""
+            )
+            arxiv_id = canonical_arxiv_id(entry_url) or ""
+            if not arxiv_id:
+                raise ArxivFetchError(
+                    f"arXiv entry at offset {offset} omitted a valid paper ID"
+                )
+            if arxiv_id in seen_arxiv_ids:
+                raise ArxivFetchError(
+                    f"arXiv pagination repeated paper ID {arxiv_id}"
+                )
+            seen_arxiv_ids.add(arxiv_id)
 
-        papers.append({
-            "paper_id": f"arxiv:{arxiv_id}",
-            "arxiv_id": arxiv_id,
-            "title": title,
-            "authors": ", ".join(names),
-            "affiliations": ", ".join(sorted(affiliations)) if affiliations else "",
-            "abstract": abstract,
-            "url": entry_url,
-            "pdf": f"https://arxiv.org/pdf/{arxiv_id}" if arxiv_id else "",
-            "date": date,
-            "score": 0,
-            "category": category,
-            "source": "arxiv",
-        })
+            author_els = entry.findall("atom:author", ATOM_NS)
+            names = []
+            affiliations = set()
+            for author in author_els:
+                name_el = author.find("atom:name", ATOM_NS)
+                if name_el is not None and name_el.text:
+                    names.append(name_el.text.strip())
+                for aff_el in author.findall("arxiv:affiliation", ATOM_NS):
+                    if aff_el.text and aff_el.text.strip():
+                        affiliations.add(aff_el.text.strip())
 
-    scored = []
-    for p in papers:
-        p["score"] = score_paper(p)
-        if p["score"] >= 0:
-            scored.append(p)
+            cat_el = entry.find("arxiv:primary_category", ATOM_NS)
+            category = cat_el.get("term", "") if cat_el is not None else ""
+            categories = [
+                value
+                for category_element in entry.findall("atom:category", ATOM_NS)
+                if (value := category_element.get("term", "").strip())
+            ]
 
-    print(
-        f"  arXiv: {len(scored)} papers after scoring (from {len(papers)} parsed, {filtered_by_date} filtered by date)",
-        file=sys.stderr,
-    )
-    return scored
+            paper = {
+                "paper_id": f"arxiv:{arxiv_id}",
+                "arxiv_id": arxiv_id,
+                "title": title,
+                "authors": ", ".join(names),
+                "affiliations": (
+                    ", ".join(sorted(affiliations)) if affiliations else ""
+                ),
+                "abstract": abstract,
+                "url": entry_url,
+                "pdf": f"https://arxiv.org/pdf/{arxiv_id}" if arxiv_id else "",
+                "date": published_date,
+                "score": 0,
+                "category": category,
+                "categories": categories,
+                "source": "arxiv",
+            }
+            paper["score"] = score_paper(paper)
+            papers.append(paper)
+
+        offset += len(entries)
+        if total_results is not None and offset < total_results:
+            sleep(ARXIV_PAGE_DELAY_SECONDS)
+
+    if snapshot is not None:
+        snapshot.update(
+            {
+                "complete": True,
+                "query_total": total_results or 0,
+                "parsed": len(papers),
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "categories": list(ARXIV_CATEGORIES),
+            }
+        )
+    print(f"  arXiv: complete snapshot of {len(papers)} papers", file=sys.stderr)
+    return papers
 
 
 # ── Merge & Dedup ──────────────────────────────────────────────────────────
@@ -576,32 +632,67 @@ def merge_and_dedup(
     arxiv_papers: list[dict],
     target_date,
     days: int = 1,
-    top_n: int = TOP_N,
+    top_n: int | None = TOP_N,
 ) -> list[dict]:
     is_weekend = target_date.weekday() >= 5
 
-    # ── merge by arXiv ID, keep higher score ──
-    by_id: dict[str, dict] = {}
-    for p in hf_papers + arxiv_papers:
-        aid = extract_arxiv_id(p["url"])
-        if not aid:
+    # The complete arXiv category snapshot is authoritative whenever it is
+    # non-empty. HF contributes ranking signals only for matching IDs. A
+    # proven-empty arXiv snapshot (normally a weekend/holiday) retains the
+    # legacy bounded HF fallback.
+    hf_by_id: dict[str, dict] = {}
+    for paper in hf_papers:
+        arxiv_id = extract_arxiv_id(paper["url"])
+        if not arxiv_id:
             continue
-        if aid not in by_id or p["score"] > by_id[aid]["score"]:
-            by_id[aid] = p
+        previous = hf_by_id.get(arxiv_id)
+        if previous is None or paper["score"] > previous["score"]:
+            hf_by_id[arxiv_id] = paper
 
-    print(f"  Merged: {len(by_id)} unique papers", file=sys.stderr)
+    by_id: dict[str, dict] = {}
+    base_papers = arxiv_papers if arxiv_papers else hf_papers
+    for paper in base_papers:
+        arxiv_id = extract_arxiv_id(paper["url"])
+        if not arxiv_id:
+            continue
+        current = dict(paper)
+        hf_signal = hf_by_id.get(arxiv_id)
+        if arxiv_papers and hf_signal is not None:
+            current["score"] = max(current["score"], hf_signal["score"])
+            current["hf_upvotes"] = hf_signal.get("hf_upvotes", 0) or 0
+            current["hf_source"] = hf_signal.get("source", "")
+        previous = by_id.get(arxiv_id)
+        if previous is None or current["score"] > previous["score"]:
+            by_id[arxiv_id] = current
+
+    if len(by_id) > MAX_ACQUIRED_PAPERS:
+        raise ArxivFetchError(
+            f"acquired metadata exceeds the {MAX_ACQUIRED_PAPERS}-paper safety limit"
+        )
+    print(
+        f"  Acquired: {len(by_id)} unique papers "
+        f"({'arXiv snapshot' if arxiv_papers else 'HF empty-snapshot fallback'})",
+        file=sys.stderr,
+    )
 
     if days > 1:
-        # ── multi-day mode: skip history dedup ──
-        # User explicitly wants to see all N days, don't filter out previously recommended
-        print(f"  Multi-day mode (days={days}): skipping history dedup", file=sys.stderr)
-        candidates = [p for p in by_id.values() if p["score"] >= MIN_SCORE]
+        # Multi-day requests intentionally remain eligible even when previously
+        # recommended, but every acquired paper still reaches semantic approval.
+        print(
+            f"  Multi-day mode (days={days}): history does not affect selection",
+            file=sys.stderr,
+        )
+        candidates = list(by_id.values())
+        for paper in candidates:
+            paper["daily_selection_eligible"] = True
         candidates.sort(key=lambda x: x["score"], reverse=True)
-        top = candidates[:top_n]
-        print(f"  Final: {len(top)} papers (top_n={top_n})", file=sys.stderr)
+        top = candidates if top_n is None else candidates[:top_n]
+        print(f"  Full metadata pool: {len(top)} papers", file=sys.stderr)
         return top
 
-    # ── single-day mode: history dedup as before ──
+    # Single-day history is now a post-acquisition selection policy. Seen
+    # papers remain in this full metadata pool and receive their own Markdown
+    # and semantic evaluation.
     history = load_history()
     history_ids: dict[str, str] = {}  # id → earliest date
     for h in history:
@@ -614,49 +705,51 @@ def merge_and_dedup(
         for fid in load_fallback_ids(target_date):
             history_ids.setdefault(fid, "unknown")
 
-    # ── cross-day dedup ──
-    deduped: dict[str, dict] = {}
-    removed = 0
+    eligible_count = 0
+    seen_papers: list[dict] = []
     for aid, p in by_id.items():
+        p["daily_selection_eligible"] = True
         if aid in history_ids:
-            # Weekend: keep trending with upvotes >= 5
-            if is_weekend and p.get("source") == "hf-trending" and (p.get("hf_upvotes") or 0) >= 5:
-                p["is_re_recommend"] = True
-                p["last_recommend_date"] = history_ids[aid]
-                deduped[aid] = p
-            else:
-                removed += 1
-        else:
-            deduped[aid] = p
-
-    # Mark any remaining that appear in history
-    for aid, p in deduped.items():
-        if aid in history_ids and not p.get("is_re_recommend"):
             p["is_re_recommend"] = True
             p["last_recommend_date"] = history_ids[aid]
+            trending_source = p.get("source") == "hf-trending" or (
+                p.get("hf_source") == "hf-trending"
+            )
+            if not (
+                is_weekend
+                and trending_source
+                and (p.get("hf_upvotes") or 0) >= 5
+            ):
+                p["daily_selection_eligible"] = False
+                seen_papers.append(p)
+                continue
+        eligible_count += 1
 
-    print(f"  After history dedup: {len(deduped)} (removed {removed})", file=sys.stderr)
+    # Preserve the legacy thin-pool behaviour without omitting any paper from
+    # approval: mark only the strongest seen papers as deterministic backfill.
+    if eligible_count < 20 and seen_papers:
+        seen_papers.sort(key=lambda paper: paper["score"], reverse=True)
+        backfill = seen_papers[: 20 - eligible_count]
+        for paper in backfill:
+            paper["daily_selection_eligible"] = True
+        if backfill:
+            print(f"  Marked {len(backfill)} history papers as backfill", file=sys.stderr)
 
-    # ── filter + sort ──
-    candidates = [p for p in deduped.values() if p["score"] >= MIN_SCORE]
-    candidates.sort(key=lambda x: x["score"], reverse=True)
+    candidates = list(by_id.values())
+    candidates.sort(
+        key=lambda paper: (
+            not paper["daily_selection_eligible"],
+            -paper["score"],
+            paper["paper_id"],
+        )
+    )
 
-    # Back-fill from history if pool is thin
-    if len(candidates) < 20 and removed > 0:
-        backfill = []
-        for aid, p in by_id.items():
-            if aid not in deduped and p["score"] >= MIN_SCORE:
-                p["is_re_recommend"] = True
-                p["last_recommend_date"] = history_ids.get(aid, "unknown")
-                backfill.append(p)
-        backfill.sort(key=lambda x: x["score"], reverse=True)
-        needed = 20 - len(candidates)
-        candidates.extend(backfill[:needed])
-        if backfill[:needed]:
-            print(f"  Back-filled {min(needed, len(backfill))} from history", file=sys.stderr)
-
-    top = candidates[:top_n]
-    print(f"  Final: {len(top)} papers", file=sys.stderr)
+    top = candidates if top_n is None else candidates[:top_n]
+    print(
+        f"  Full metadata pool: {len(top)} papers; "
+        f"{sum(bool(p['daily_selection_eligible']) for p in top)} selection-eligible",
+        file=sys.stderr,
+    )
     return top
 
 
@@ -697,6 +790,11 @@ def main() -> int:
         help=f"Number of days to fetch, 1-{MAX_FETCH_DAYS} (default: 1)",
     )
     parser.add_argument("--output", type=Path, help="Write JSON to this file instead of stdout")
+    parser.add_argument(
+        "--summary",
+        type=Path,
+        help="Write the acquisition completeness summary to this file",
+    )
     args = parser.parse_args()
 
     try:
@@ -718,12 +816,10 @@ def main() -> int:
     target_date = resolve_target_date(args.date, timezone)
     days = args.days
     start_date = target_date - timedelta(days=days - 1)
-    top_n = TOP_N * days
-
     is_weekend = target_date.weekday() >= 5
     print(
         f"[fetch_and_score] {target_date} ({'weekend' if is_weekend else 'weekday'})"
-        + (f", days={days} [{start_date} ~ {target_date}], top_n={top_n}" if days > 1 else ""),
+        + (f", days={days} [{start_date} ~ {target_date}]" if days > 1 else ""),
         file=sys.stderr,
     )
 
@@ -732,20 +828,56 @@ def main() -> int:
         request_timeout_seconds=FETCH_REQUEST_TIMEOUT_SECONDS,
         run_timeout_seconds=FETCH_RUN_TIMEOUT_SECONDS,
     )
+    arxiv_snapshot: dict = {}
+    try:
+        arxiv_papers = fetch_arxiv_papers(
+            start_date,
+            target_date,
+            days,
+            client=HTTP_CLIENT,
+            budget=fetch_budget,
+            snapshot=arxiv_snapshot,
+        )
+    except ArxivFetchError as exc:
+        print(
+            json.dumps(
+                {
+                    "status": "blocked",
+                    "code": "incomplete-arxiv-snapshot",
+                    "message": str(exc),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 3
     hf_papers = fetch_hf_papers(
         start_date,
         target_date,
         client=HTTP_CLIENT,
         budget=fetch_budget,
     )
-    arxiv_papers = fetch_arxiv_papers(
-        start_date,
+    top = merge_and_dedup(
+        hf_papers,
+        arxiv_papers,
         target_date,
-        days,
-        client=HTTP_CLIENT,
-        budget=fetch_budget,
+        days=days,
+        top_n=None,
     )
-    top = merge_and_dedup(hf_papers, arxiv_papers, target_date, days=days, top_n=top_n)
+    acquisition_summary = {
+        "version": 1,
+        "complete": True,
+        "target_date": target_date.isoformat(),
+        "window_days": days,
+        "arxiv": arxiv_snapshot,
+        "huggingface_count": len(hf_papers),
+        "acquired_count": len(top),
+        "selection_eligible_count": sum(
+            bool(paper.get("daily_selection_eligible", True))
+            for paper in top
+        ),
+    }
 
     try:
         output = encode_json_value(
@@ -753,6 +885,7 @@ def main() -> int:
             max_bytes=MAX_OUTPUT_BYTES,
             label="Fetch output",
         )
+        acquisition_summary["acquired_sha256"] = hashlib.sha256(output).hexdigest()
         if args.output:
             atomic_write_bytes(
                 args.output,
@@ -764,6 +897,18 @@ def main() -> int:
             if hasattr(sys.stdout, "reconfigure"):
                 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
             sys.stdout.write(output.decode("utf-8"))
+        if args.summary:
+            summary_output = encode_json_value(
+                acquisition_summary,
+                max_bytes=MAX_OUTPUT_BYTES,
+                label="Acquisition summary",
+            )
+            atomic_write_bytes(
+                args.summary,
+                summary_output,
+                mode=0o600,
+                label="Acquisition summary",
+            )
     except SafeIOError as exc:
         print(
             json.dumps(

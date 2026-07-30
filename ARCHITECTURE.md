@@ -10,7 +10,7 @@
     ├─ configure-dailypaper（安装后首个入口；本机路径 + 共享研究配置）
     ├─ daily-papers（每日推荐）
     │    └─ workflows/daily.md
-    │         ├─ fetch.md（Python，零 token）
+    │         ├─ fetch.md（完整元数据 + 逐篇低成本审批）
     │         ├─ review.md（当前 agent 点评）
     │         └─ notes.md（当前 agent + paper-reader workflow）
     ├─ paper-reader（手动读单篇论文 / Zotero）
@@ -32,7 +32,7 @@ notes 三个流水线阶段仍然只作为 `daily-papers` 的内部资源。
 | `paper-reader` | 手动精读一篇论文并保存 | Standalone Session、`paper_identity`、note validator、MOC builder | 日报 Manifest、批量发布 |
 | `generate-mocs` | 手动重建 Obsidian 导航 | Standalone Session、MOC plan/apply | 读论文、改配置 |
 
-内部 fetch 是确定性采集岗位；review 是有判断力的筛选和写作岗位；notes 是逐篇
+内部 fetch 是确定性采集与逐篇相关度审批岗位；review 是主模型筛选和写作岗位；notes 是逐篇
 编排与最终内容收口岗位。它们不是三个可独立安装的 Skill，因为 review 依赖
 fetch 的 enriched artifact，notes 又依赖 recommendation、history、匹配报告和
 父 Run 的锁。把它们公开会制造悬空输入和第二套生命周期。
@@ -43,6 +43,7 @@ fetch 的 enriched artifact，notes 又依赖 recommendation、history、匹配�
 | --- | --- |
 | 有界 nofollow 读取、单描述符检查/复制/哈希、严格 JSON 编解码与 durable atomic replace | `safe_io.py` |
 | portable POSIX 相对路径解析、长度预算与 symlink containment | `safe_path.py` |
+| 单篇候选 Markdown、Evaluation v1 校验、缺失审批恢复与候选汇总 | `candidate_approval.py` |
 | Git 命令预算、仓库身份/dirty snapshot、blob OID 固定、有界读取与 index 版本守卫 | `safe_git.py` + `safe_process.py` |
 | 配置合并、字段验证、路径安全、指纹 | `config_schema.py` |
 | 配置同步、原子应用、无 patch 恢复和精确发布 | `config_manager.py prepare/apply/resume` + `run_guardian.py` |
@@ -278,32 +279,66 @@ hash。`deterministic-failure` 也先保存这些安全证据 checkpoint，再�
 
 ## Step 1: fetch workflow
 
-**纯 Python，不消耗模型 token。**
+抓取和 artifact 处理使用确定性 Python；只有逐篇相关度审批消耗低成本模型 token。
 
-### 1.1 抓取 + 打分（fetch_and_score.py）
+### 1.1 完整元数据抓取（fetch_and_score.py）
 
 数据源：
 - HuggingFace Daily Papers API：`https://huggingface.co/api/daily_papers?date=YYYY-MM-DD`
 - HuggingFace Trending API：`https://huggingface.co/api/daily_papers?sort=trending`
 - arXiv API：`https://export.arxiv.org/api/query`，分类来自
-  `daily_papers.arxiv_categories` 配置
+  `daily_papers.arxiv_categories`，日期来自冻结的 Run window
 
-打分规则：
-- 命中 `negative_keywords` → 直接 -999 排除
+arXiv 使用 `start` / `max_results` 分页，并在每页验证稳定的 `totalResults`。
+超过 3000 篇安全上限、响应提前结束、总数变化或条目缺少标题/摘要/稳定 ID 时，
+snapshot 不能证明完整，阶段失败而不是静默截断。
+
+非空 arXiv snapshot 是选定分类的权威 acquisition 集合；HuggingFace 只为其中
+相同 arXiv ID 叠加 upvote/trending 信号。只有 arXiv snapshot 已完整证明为空时，
+才使用不超过 3200 篇总 acquisition 上限的 HF fallback，以保留周末/节假日行为。
+抓取顺序优先 arXiv，避免可选 HF 请求消耗共享预算后妨碍完整性证明。
+
+确定性信号：
 - 命中 `keywords`：标题 +3，摘要 +1
 - 命中 `domain_boost_keywords`：+1~2
+- 命中 `negative_keywords`：扣分，但不删除论文
 - Trending 加分：根据 upvotes 分档（5 / 10 / 20），相关论文 +1~3，不相关的只有 20+ upvotes 才加分
 
 去重：
-- 按 arXiv ID 合并，保留高分
-- 单天模式：跟 `.history.json` 交叉去重
-- 周末模式：保留 5+ upvotes 的热门论文作为"再推荐"
-- 多天模式（days > 1）：跳过历史去重
-- 候选不足 20 篇时从历史回补
+- 按稳定 arXiv ID 合并
+- 单天模式：跟 `.history.json` 交叉标记，但不从 acquisition/审批池删除
+- 周末模式：把 5+ upvotes 的热门历史论文标为可再推荐
+- 多天模式（days > 1）：历史不影响后置入选资格
+- 新论文不足 20 篇时，把得分最高的历史论文标为可回补；其他历史论文仍接受语义审批
 
-输出：`{RUN_DIR}/candidates.json`
+输出：`{RUN_DIR}/acquired-papers.json` 和完整性
+`{RUN_DIR}/acquisition-summary.json`。summary 记录 acquired artifact SHA-256、
+完整 arXiv scope/count 和后置入选计数；关键词信号不拥有相关性否决权。
 
-### 1.2 元数据富化（enrich_papers.py）
+### 1.2 单篇相关度审批（candidate_approval.py）
+
+`prepare` 先验证 acquisition summary 与原始 metadata 的 SHA-256 绑定，再为每篇
+acquired paper 生成独立 Markdown，并把 summary/metadata SHA-256、规范 paper
+payload、Markdown SHA-256 和预期 Evaluation 路径写入
+`candidate-index.json`。候选文件和逐篇审批都在 Run 目录，不进入 Vault。
+
+支持 Subagent 时，fetch workflow 使用最多 8 个低成本 worker；每个逻辑任务只读取
+一篇候选和冻结的研究配置，并写一个 Evaluation v1：
+
+- `approve`：直接相关或有明确可迁移价值；
+- `uncertain`：交给主评审复核；
+- `reject`：可以基于标题和摘要明确排除。
+
+恢复时若 index 存在，workflow 必须先运行 `pending` 并复用已绑定 artifact，不得
+重新抓取动态数据或覆盖已有审批；只有 index 缺失时才从已绑定 acquisition 运行
+`prepare`，两者都缺失时才重新抓取。`pending` 只返回缺失审批。`collect` 重新验证
+source、index、候选 SHA-256、`paper_id` 和 evaluation input hash，保留 `approve`、
+`uncertain`，并用 `min_score` 救回可能被模型误拒的强关键词论文；随后按每日
+`top_n` 形成 `{RUN_DIR}/candidates.json`。历史不合格项仍被评估和计数，但不进入
+最终候选。Subagent 是执行 Adapter，不是生命周期所有者；不支持 Subagent 的
+Harness 通过同一 Interface inline 执行。
+
+### 1.3 元数据富化（enrich_papers.py）
 
 用 `asyncio` + `safe_http.py` 并发（Semaphore=10）请求 arXiv 页面。所有跳转逐跳
 重新校验，DNS 结果固定到公开地址，并统一限制响应头、编码、单请求/总字节数和
