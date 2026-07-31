@@ -89,7 +89,7 @@ brew install poppler
 
 ```bash
 npx --yes skills@1.5.20 add \
-  "https://github.com/haoz0206/dailypaper-skills.git#v1.1.0" \
+  "https://github.com/haoz0206/dailypaper-skills.git#v1.2.0" \
   --skill configure-dailypaper daily-papers paper-reader generate-mocs \
   --agent claude-code codex \
   --global --yes
@@ -97,7 +97,7 @@ npx --yes skills@1.5.20 add \
 
 > [!NOTE]
 > 请先在 [GitHub Releases](https://github.com/haoz0206/dailypaper-skills/releases)
-> 确认 `v1.1.0` 已发布。tag 尚未发布时，上述命令不会成功；维护者测试或发布前验收
+> 确认 `v1.2.0` 已发布。tag 尚未发布时，上述命令不会成功；维护者测试或发布前验收
 > 应使用下面的开发 checkout。不要把 `main` 当作可复现的生产版本。
 
 安装器会在 `.agents/skills` 保存通用 Skill，并为支持的 harness 创建对应入口。
@@ -144,6 +144,16 @@ onboarding 会按顺序：
 
 Linux 服务器推荐使用 `/workspace/dailypaper-vault`。Mac 可以配置不同的本地 clone
 路径；机器路径不进入共享配置，也不影响跨 harness 的配置指纹。
+
+安装包内的 `scripts/shared/defaults.json` 只是只读的首次 bootstrap 默认值，不是
+用户设置。首次配置后，完整共享设置保存在带 `schema_version` 的 Vault 配置中；
+重新安装或升级 Skills 只替换程序与包内 defaults，不会覆盖机器配置或 Vault
+配置，也不会让省略字段悄悄继承新版默认值。
+
+从 `v1.1.x` 或更早版本升级时，`查看当前每日论文配置` 会标记
+`migration_required=true`。先让 `configure-dailypaper` 预览迁移，确认后再发布：
+迁移使用冻结的旧版默认值重建原有有效配置并将它完整固化到 Vault，不采用新版
+defaults，也不改变研究范围。迁移与普通设置修改分成两个可恢复 Git 事务。
 
 查看或修改研究范围：
 

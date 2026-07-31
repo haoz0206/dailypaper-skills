@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import sys
@@ -29,7 +30,7 @@ class RuntimeContextTests(unittest.TestCase):
         self.vault.mkdir()
         self.shared_config = self.vault / ".dailypaper" / "config.json"
         self.shared_config.parent.mkdir()
-        self.shared_config.write_text("{}\n", encoding="utf-8")
+        self._write_shared_config()
         self.machine_config = self.root / "machine.json"
         self.machine_config.write_text(
             json.dumps(
@@ -48,6 +49,21 @@ class RuntimeContextTests(unittest.TestCase):
         )
         self.environment.start()
         user_config.clear_config_cache()
+
+    def _write_shared_config(self, patch_value: dict | None = None) -> None:
+        document = user_config.config_schema.materialize_shared_config(
+            copy.deepcopy(user_config.DEFAULT_CONFIG),
+            user_config.DEFAULT_CONFIG,
+        )
+        for section, fields in (patch_value or {}).items():
+            if isinstance(fields, dict) and isinstance(document.get(section), dict):
+                document[section].update(fields)
+            else:
+                document[section] = fields
+        self.shared_config.write_text(
+            json.dumps(document, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
 
     def tearDown(self) -> None:
         user_config.clear_config_cache()
@@ -139,15 +155,12 @@ class RuntimeContextTests(unittest.TestCase):
             ),
             (
                 {"daily_papers": {"unknown": True}},
-                "unsupported daily_papers fields",
+                "unsupported fields",
             ),
         )
         for payload, message in cases:
             with self.subTest(payload=payload):
-                self.shared_config.write_text(
-                    json.dumps(payload),
-                    encoding="utf-8",
-                )
+                self._write_shared_config(payload)
                 user_config.clear_config_cache()
                 with self.assertRaisesRegex(
                     runtime_context.RuntimeContextError,
@@ -197,7 +210,16 @@ class RuntimeContextTests(unittest.TestCase):
         alternate.mkdir()
         config = alternate / ".dailypaper" / "config.json"
         config.parent.mkdir()
-        config.write_text("{}\n", encoding="utf-8")
+        config.write_text(
+            json.dumps(
+                user_config.config_schema.materialize_shared_config(
+                    copy.deepcopy(user_config.DEFAULT_CONFIG),
+                    user_config.DEFAULT_CONFIG,
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         self.machine_config.unlink()
         with patch.dict(
             os.environ,

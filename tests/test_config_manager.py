@@ -28,21 +28,26 @@ import run_guardian
 
 
 class ConfigManagerTests(unittest.TestCase):
+    def _shared_document(
+        self,
+        *,
+        repository_url: str | None = None,
+    ) -> dict:
+        effective = copy.deepcopy(config_manager.DEFAULT_CONFIG)
+        if repository_url is not None:
+            effective["repository"]["url"] = repository_url
+        defaults = copy.deepcopy(effective)
+        return config_manager.config_schema.materialize_shared_config(
+            effective,
+            defaults,
+        )
+
     def _vault(self, root: Path) -> tuple[Path, Path]:
         vault = root / "vault"
         config_path = vault / ".dailypaper" / "config.json"
         config_path.parent.mkdir(parents=True)
         config_path.write_text(
-            json.dumps(
-                {
-                    "paths": {"obsidian_vault": "."},
-                    "repository": {
-                        "url": "git@github.com:haoz0206/dailypaper-vault.git",
-                        "remote": "origin",
-                        "branch": "main",
-                    },
-                }
-            ),
+            json.dumps(self._shared_document()),
             encoding="utf-8",
         )
         return vault, config_path
@@ -71,16 +76,7 @@ class ConfigManagerTests(unittest.TestCase):
         config_path = seed / ".dailypaper" / "config.json"
         config_path.parent.mkdir(parents=True)
         config_path.write_text(
-            json.dumps(
-                {
-                    "paths": {"obsidian_vault": "."},
-                    "repository": {
-                        "url": str(remote),
-                        "remote": "origin",
-                        "branch": "main",
-                    },
-                }
-            ),
+            json.dumps(self._shared_document(repository_url=str(remote))),
             encoding="utf-8",
         )
         if task_state is not None:
@@ -141,16 +137,22 @@ class ConfigManagerTests(unittest.TestCase):
                 / "daily-papers"
                 / "scripts"
                 / "shared"
-                / "user-config.json"
+                / "defaults.json"
             ).read_text(encoding="utf-8")
         )
         base["repository"]["url"] = str(remote)
+        legacy = copy.deepcopy(base)
         with (
             patch.object(config_manager, "DEFAULT_CONFIG", defaults),
             patch.object(
                 config_manager,
                 "_base_config",
                 side_effect=lambda: copy.deepcopy(base),
+            ),
+            patch.object(
+                config_manager,
+                "_legacy_base_config",
+                side_effect=lambda: copy.deepcopy(legacy),
             ),
         ):
             yield
@@ -191,6 +193,130 @@ class ConfigManagerTests(unittest.TestCase):
                 plan["proposed"]["repository"]["branch"],
                 "main",
             )
+
+    def test_legacy_config_requires_migration_before_setting_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _vault, config_path = self._vault(root)
+            config_path.write_text(
+                json.dumps({"daily_papers": {"top_n": 17}}),
+                encoding="utf-8",
+            )
+            patch_path = root / "patch.json"
+            patch_path.write_text(
+                json.dumps({"daily_papers": {"top_n": 12}}),
+                encoding="utf-8",
+            )
+
+            shown = config_manager.show_configuration(config_path)
+            self.assertTrue(shown["migration_required"])
+            self.assertEqual(shown["daily_papers"]["top_n"], 17)
+            with self.assertRaisesRegex(
+                config_manager.ConfigError,
+                "explicitly approve migration",
+            ):
+                config_manager.build_plan(config_path, patch_path)
+
+    def test_migration_pins_legacy_effective_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _vault, config_path = self._vault(root)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "daily_papers": {"top_n": 17},
+                        "automation": {"auto_refresh_indexes": False},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            patch_path = root / "migration.json"
+            patch_path.write_text(
+                json.dumps(
+                    {"migration": {"target_schema_version": 1}}
+                ),
+                encoding="utf-8",
+            )
+
+            plan = config_manager.build_plan(config_path, patch_path)
+
+            self.assertEqual(
+                plan["migration"],
+                {"from_schema_version": 0, "to_schema_version": 1},
+            )
+            self.assertEqual(plan["proposed"]["schema_version"], 1)
+            self.assertEqual(plan["proposed"]["daily_papers"]["top_n"], 17)
+            self.assertFalse(
+                plan["proposed"]["automation"]["auto_refresh_indexes"]
+            )
+            self.assertEqual(
+                plan["proposed"]["daily_papers"]["keywords"],
+                config_manager.DEFAULT_CONFIG["daily_papers"]["keywords"],
+            )
+
+    def test_apply_migration_uses_the_recoverable_publication_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            remote, vault, config_path = self._publication_vault(root)
+            legacy = {
+                "paths": {"obsidian_vault": "."},
+                "repository": {
+                    "url": str(remote),
+                    "remote": "origin",
+                    "branch": "main",
+                },
+                "daily_papers": {"top_n": 17},
+            }
+            config_path.write_text(json.dumps(legacy), encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", str(vault), "add", ".dailypaper/config.json"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(vault),
+                    "-c",
+                    "user.name=test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "-m",
+                    "legacy config",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(vault), "push", "origin", "main"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            patch_path = root / "migration.json"
+            patch_path.write_text(
+                json.dumps(
+                    {"migration": {"target_schema_version": 1}}
+                ),
+                encoding="utf-8",
+            )
+
+            with self._repository_contract(remote):
+                result = config_manager.apply_plan(
+                    vault,
+                    config_path,
+                    patch_path,
+                )
+                effective = config_manager.validate_config(config_path)
+
+            written = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(result["status"], "published")
+            self.assertEqual(written["schema_version"], 1)
+            self.assertEqual(effective["daily_papers"]["top_n"], 17)
 
     def test_apply_writes_valid_config_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

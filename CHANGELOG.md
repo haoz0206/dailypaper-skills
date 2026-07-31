@@ -9,7 +9,25 @@ as breaking changes.
 
 ## [Unreleased]
 
-- Nothing yet.
+Nothing yet.
+
+## [1.2.0] - 2026-07-31
+
+### Added
+
+- Versioned, complete Vault configuration snapshots and an explicit,
+  crash-resumable legacy migration path.
+
+### Changed
+
+- Renamed the bundled `user-config.json` resource to `defaults.json` and
+  clarified that installed Skills read user settings only from the machine
+  configuration and the Vault.
+
+### Fixed
+
+- Skill upgrades can no longer change omitted legacy settings by replacing
+  bundled defaults; migration pins the previously effective values instead.
 
 ## [1.1.0] - 2026-07-30
 
@@ -98,6 +116,7 @@ First formal release of the maintained unified-harness derivative.
   [huangkiki/dailypaper-skills](https://github.com/huangkiki/dailypaper-skills)
   under Apache-2.0. See `NOTICE`.
 
-[Unreleased]: https://github.com/haoz0206/dailypaper-skills/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/haoz0206/dailypaper-skills/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/haoz0206/dailypaper-skills/releases/tag/v1.2.0
 [1.1.0]: https://github.com/haoz0206/dailypaper-skills/releases/tag/v1.1.0
 [1.0.0]: https://github.com/haoz0206/dailypaper-skills/releases/tag/v1.0.0

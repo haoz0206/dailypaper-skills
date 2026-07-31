@@ -40,6 +40,8 @@
    - 把返回的 `runtime_context` 完整保存为只读 `RUNTIME_CONTEXT`。后续阶段只从
      这个对象读取 `paths`、`runtime`、`repository`、`daily_papers`、
      `automation` 和 `configuration_fingerprint`，不得再次读取或手工合并配置文件。
+     这些值只来自本机配置与已版本化的 Vault 配置；包内 `defaults.json` 仅用于
+     首次 bootstrap/显式迁移，不是本次运行的隐式用户设置。
    - 从 `runtime_context_file` 取得 Coordinator 冻结的绝对
      `RUNTIME_CONTEXT_FILE`；需要启动 Python 子进程时传入该文件，不得把配置重新
      展开成易漂移的另一套命令行参数。
@@ -77,6 +79,7 @@
      `--confirm-attention-run-id "<exact run_id>"`。
    - `blocked`：展示 `code` 和 `message` 后停止。不得绕过工作树、配置指纹、
      workflow contract、远程分支或所有权检查。
+     配置需要迁移时，明确要求用户先运行 `configure-dailypaper` 并批准迁移。
 
 5. 只有用户明确确认取消 `cancel-confirmation-required` 中展示的 exact
    `run_id` 后，才把 **该次 `start` 返回的原始 `proposal` JSON 对象原样**交回

@@ -51,7 +51,7 @@ COMMON_CONFIG = (
     "scripts/shared/config_schema.py",
     "scripts/shared/machine_config.py",
     "scripts/shared/user_config.py",
-    "scripts/shared/user-config.json",
+    "scripts/shared/defaults.json",
 )
 RUNTIME_PREFLIGHT = (
     "scripts/shared/task_state.py",
@@ -80,6 +80,7 @@ CONFIG_GUARD = (
     "scripts/shared/task_state.py",
     "scripts/shared/active_run_guard.py",
     "scripts/configure/config_manager.py",
+    "scripts/configure/shared-config-v0-defaults.json",
 )
 
 PUBLIC_SKILLS = (
@@ -133,9 +134,9 @@ PUBLIC_SKILLS = (
         name="configure-dailypaper",
         description=(
             "Perform first-run DailyPaper onboarding and safely inspect or "
-            "update configuration. Use immediately after installation to set "
-            "the per-machine Vault path, initialize or validate the fixed Vault "
-            "repository, configure optional Zotero paths, or change research "
+            "migrate or update configuration. Use immediately after installation "
+            "to set the per-machine Vault path, initialize or validate the fixed "
+            "Vault repository, configure optional Zotero paths, or change research "
             "keywords, arXiv categories, thresholds, and index automation. Use "
             "for “配置每日论文”, “查看当前每日论文配置”, or first-run setup."
         ),
@@ -147,6 +148,7 @@ PUBLIC_SKILLS = (
             "scripts/shared/run_guardian.py",
             "scripts/shared/run_lifecycle.py",
             "scripts/shared/vault_coordination.py",
+            "references/configuration-migration.md",
         ),
     ),
 )

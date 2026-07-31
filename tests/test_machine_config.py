@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import stat
@@ -60,8 +61,15 @@ class MachineConfigTests(unittest.TestCase):
             vault = root / "vault"
             shared_path = vault / ".dailypaper" / "config.json"
             shared_path.parent.mkdir(parents=True)
+            effective = copy.deepcopy(user_config.DEFAULT_CONFIG)
+            effective["daily_papers"]["top_n"] = 11
             shared_path.write_text(
-                json.dumps({"daily_papers": {"top_n": 11}}),
+                json.dumps(
+                    user_config.config_schema.materialize_shared_config(
+                        effective,
+                        user_config.DEFAULT_CONFIG,
+                    )
+                ),
                 encoding="utf-8",
             )
             with patch.dict(

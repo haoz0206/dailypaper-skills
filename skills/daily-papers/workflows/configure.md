@@ -8,6 +8,8 @@
 - 本机可写：`DAILYPAPER_MACHINE_CONFIG` 指向的文件，默认
   `~/.config/dailypaper/config.json`
 - 可写：`{VAULT_PATH}/.dailypaper/config.json`
+- 包内 `scripts/shared/defaults.json` 只是只读的首次 bootstrap 默认值，不是用户
+  配置；Skill 更新可以替换它，但不得因此改写已版本化的 Vault 配置
 - 只读：`{VAULT_PATH}/.dailypaper/tasks/daily-papers.json`
 - 不管理：`{VAULT_PATH}/.dailypaper/runs/`
 - 不得把绝对 Vault 路径、SSH key、token 或 Harness 安装路径写入共享配置
@@ -51,25 +53,19 @@ python3 "{SKILL_ROOT}/scripts/configure/onboard.py" \
   --vault "{VAULT_PATH}"
 ```
 
-入口会把不存在的目标 clone 到唯一同级临时目录，成功后才 rename；已有目标必须是
-固定远程和 `main` 分支的 Git 根目录。它随后完成可恢复 bootstrap，并且只有
-bootstrap 成功后才原子写入和回读验证本机配置。路径错误、clone 失败或已有目录
-不匹配时停止，不覆盖或删除用户目录。该机器文件供 Claude Code、Codex 和其他
-Harness 共用，不提交到 Skills 仓库或 Vault。Zotero 路径只有用户明确要求时才在
-同一命令追加 `--zotero-db`、`--zotero-storage`。
+入口安全 clone/验证固定远程，完成可恢复 bootstrap 后才原子持久化本机配置；
+失败时不覆盖用户目录。该机器文件跨 Harness 共用且不提交。仅在用户明确要求时
+追加 `--zotero-db`、`--zotero-storage`。
 
-本机已经有效配置且用户只查看或修改共享研究配置时，只验证 Vault，不重复执行
-bootstrap 或 `machine_config.py set`。这样纯查看不会创建文件或 Git 提交。
+本机配置有效时只验证 Vault，不重复 bootstrap 或 `machine_config.py set`。
 用户只修改 Zotero 路径时，验证现有 Vault 后使用现有 `--vault` 调用 `set`，无需
 bootstrap。
 
-onboarding 成功 JSON 已包含回读验证后的 `config`，不要再重复运行
-`machine_config.py validate`。
-后续运行不再要求持久化 `DAILYPAPER_VAULT` 或 `DAILYPAPER_CONFIG`；显式环境变量
-仍可作为临时覆盖。
+onboarding 成功 JSON 已含回读验证后的 `config`，不要重复 validate。后续无需
+持久化 `DAILYPAPER_VAULT` 或 `DAILYPAPER_CONFIG`。
 
-共享配置固定为 `{VAULT_PATH}/.dailypaper/config.json`。如果
-`DAILYPAPER_CONFIG` 已设置，它必须解析为同一个文件，否则停止并报告冲突。
+共享配置固定为 `{VAULT_PATH}/.dailypaper/config.json`；显式
+`DAILYPAPER_CONFIG` 必须指向同一文件。
 
 ## Step 2：选择共享配置操作模式
 
@@ -104,7 +100,13 @@ python3 "{SKILL_ROOT}/scripts/configure/config_manager.py" \
   --vault "{VAULT_PATH}" show
 ```
 
-`show` 会先执行完整配置校验再输出有效配置；不得紧接着重复运行 `validate`。
+`show` 会输出配置来源、共享 schema 版本和有效配置；不得紧接着重复运行
+`validate`。向用户明确说明：本机绝对路径来自机器配置，共享研究设置来自 Vault
+配置，包内 defaults 不作为已配置用户的隐式设置。
+
+如果 `migration_required=true`，完整读取
+`{SKILL_ROOT}/references/configuration-migration.md` 并按其中流程处理。纯查看
+只报告需要迁移；任何写入型 Skill 运行前必须先由用户明确批准迁移。
 
 解释配置时区分：
 
@@ -133,7 +135,7 @@ python3 "{SKILL_ROOT}/scripts/configure/config_manager.py" \
 
 ## Step 5：生成和预览 patch
 
-只允许生成以下结构的 JSON patch：
+普通设置修改只允许生成以下结构的 JSON patch：
 
 ```json
 {
@@ -207,4 +209,6 @@ python3 "{SKILL_ROOT}/scripts/configure/config_manager.py" \
   `min_score` 关键词救回和分类收窄的不同影响。
 - 共享数组 patch 会替换整个数组。保留用户仍然需要的旧值，不要只写新增项。
 - Zotero 数据库和服务器绝对路径属于 per-machine 配置，不写入共享 Vault。
+- 已版本化的 Vault 配置是完整用户快照；后续 Skill 更新不得用包内 defaults
+  补齐或覆盖其中字段。新增 schema 字段只能经显式版本迁移进入。
 - repository、稳定输出目录和任务状态文件不是本 Skill 的可配置项。

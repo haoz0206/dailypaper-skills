@@ -107,16 +107,35 @@ def resolve_config_path(vault: Path, configured: Path | None = None) -> Path:
 
 
 def _base_config() -> dict[str, Any]:
-    tracked = _load_json(SHARED_DIR / "user-config.json")
+    tracked = _load_json(SHARED_DIR / "defaults.json")
     config_schema.validate_effective_config(tracked, DEFAULT_CONFIG)
     return tracked
 
 
-def load_effective_config(config_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+def _legacy_base_config() -> dict[str, Any]:
+    tracked = _load_json(
+        SKILL_ROOT / "scripts/configure/shared-config-v0-defaults.json"
+    )
+    config_schema.validate_effective_config(tracked, tracked)
+    return tracked
+
+
+def load_effective_config(
+    config_path: Path,
+    *,
+    allow_legacy: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     external = _load_json(config_path)
-    base = _base_config()
-    config_schema.validate_overlay(external, base, DEFAULT_CONFIG)
-    effective = config_schema.deep_merge(copy.deepcopy(base), external)
+    version = config_schema.shared_config_version(external)
+    base = _legacy_base_config() if version == 0 else _base_config()
+    validation_defaults = base if version == 0 else DEFAULT_CONFIG
+    payload = config_schema.validate_shared_config(
+        external,
+        base,
+        validation_defaults,
+        allow_legacy=allow_legacy,
+    )
+    effective = config_schema.deep_merge(copy.deepcopy(base), payload)
     config_schema.validate_effective_config(effective, DEFAULT_CONFIG)
     return effective, external
 
@@ -126,7 +145,7 @@ def normalize_daily_config(value: Any) -> dict[str, Any]:
 
 
 def _validate_external_safety(external: dict[str, Any]) -> None:
-    config_schema.validate_overlay(
+    config_schema.validate_shared_config(
         external,
         _base_config(),
         DEFAULT_CONFIG,
@@ -139,7 +158,7 @@ def validate_config(config_path: Path) -> dict[str, Any]:
 
 
 def _validate_patch(patch: dict[str, Any]) -> None:
-    unknown_sections = set(patch) - {"daily_papers", "automation"}
+    unknown_sections = set(patch) - {"daily_papers", "automation", "migration"}
     if unknown_sections:
         raise ConfigError(
             "Unsupported configuration sections: "
@@ -147,6 +166,25 @@ def _validate_patch(patch: dict[str, Any]) -> None:
         )
     if not patch:
         raise ConfigError("Patch must not be empty")
+
+    if "migration" in patch:
+        if set(patch) != {"migration"}:
+            raise ConfigError(
+                "A configuration migration patch cannot include setting changes"
+            )
+        migration = patch["migration"]
+        if not isinstance(migration, dict) or set(migration) != {
+            "target_schema_version"
+        }:
+            raise ConfigError(
+                "Patch migration must contain only target_schema_version"
+            )
+        if migration["target_schema_version"] != config_schema.SHARED_CONFIG_VERSION:
+            raise ConfigError(
+                "Patch migration target_schema_version must be "
+                f"{config_schema.SHARED_CONFIG_VERSION}"
+            )
+        return
 
     if "daily_papers" in patch:
         daily_patch = patch["daily_papers"]
@@ -198,9 +236,33 @@ def build_plan(
     *,
     allow_no_changes: bool = False,
 ) -> dict[str, Any]:
-    effective, external = load_effective_config(config_path)
     patch = _load_json(patch_path)
     _validate_patch(patch)
+    is_migration = "migration" in patch
+    effective, external = load_effective_config(
+        config_path,
+        allow_legacy=is_migration,
+    )
+    if is_migration:
+        proposed_external = config_schema.materialize_shared_config(
+            effective,
+            DEFAULT_CONFIG,
+        )
+        changes = _changes(external, proposed_external)
+        if not changes and not allow_no_changes:
+            raise ConfigError(
+                "Shared Vault configuration already uses the current schema"
+            )
+        return {
+            "config_path": str(config_path),
+            "changes": changes,
+            "proposed": proposed_external,
+            "migration": {
+                "from_schema_version": config_schema.shared_config_version(external),
+                "to_schema_version": config_schema.SHARED_CONFIG_VERSION,
+            },
+        }
+
     if not isinstance(effective.get("daily_papers"), dict):
         raise ConfigError("Existing effective daily_papers must be an object")
     if not isinstance(effective.get("automation"), dict):
@@ -227,7 +289,12 @@ def build_plan(
 
     _validate_external_safety(proposed_external)
     proposed_effective = _base_config()
-    config_schema.deep_merge(proposed_effective, proposed_external)
+    proposed_payload = config_schema.validate_shared_config(
+        proposed_external,
+        proposed_effective,
+        DEFAULT_CONFIG,
+    )
+    config_schema.deep_merge(proposed_effective, proposed_payload)
     config_schema.validate_effective_config(
         proposed_effective,
         DEFAULT_CONFIG,
@@ -890,6 +957,27 @@ def prepare_configuration(vault: Path) -> dict[str, Any]:
         raise ConfigError(str(exc)) from exc
 
 
+def show_configuration(config_path: Path) -> dict[str, Any]:
+    """Show effective settings while identifying legacy storage explicitly."""
+    effective, external = load_effective_config(config_path, allow_legacy=True)
+    version = config_schema.shared_config_version(external)
+    return {
+        "config_path": str(config_path),
+        "config_sources": {
+            "machine": "DAILYPAPER_MACHINE_CONFIG or ~/.config/dailypaper/config.json",
+            "shared": str(config_path),
+            "bundled_defaults": "read-only bootstrap and migration resource",
+        },
+        "shared_schema_version": version,
+        "migration_required": version != config_schema.SHARED_CONFIG_VERSION,
+        "daily_papers": effective["daily_papers"],
+        "automation": {
+            field: effective["automation"][field]
+            for field in sorted(EDITABLE_AUTOMATION_FIELDS)
+        },
+    }
+
+
 def _print_json(value: Any) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2))
 
@@ -918,17 +1006,7 @@ def main() -> int:
         elif args.command == "resume":
             _print_json(resume_publication(vault, config_path))
         elif args.command == "show":
-            effective = validate_config(config_path)
-            _print_json(
-                {
-                    "config_path": str(config_path),
-                    "daily_papers": effective["daily_papers"],
-                    "automation": {
-                        field: effective["automation"][field]
-                        for field in sorted(EDITABLE_AUTOMATION_FIELDS)
-                    },
-                }
-            )
+            _print_json(show_configuration(config_path))
         elif args.command == "validate":
             validate_config(config_path)
             _print_json({"status": "valid", "config_path": str(config_path)})

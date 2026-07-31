@@ -1,3 +1,4 @@
+import os
 import re
 import shutil
 import subprocess
@@ -479,6 +480,22 @@ class InstallationTests(unittest.TestCase):
                         result = subprocess.run(
                             command,
                             cwd=temp_dir,
+                            env={
+                                **{
+                                    key: value
+                                    for key, value in os.environ.items()
+                                    if key
+                                    not in {
+                                        "DAILYPAPER_CONFIG",
+                                        "DAILYPAPER_MACHINE_CONFIG",
+                                        "DAILYPAPER_VAULT",
+                                        "DAILYPAPER_WORKSPACE",
+                                    }
+                                },
+                                "DAILYPAPER_MACHINE_CONFIG": str(
+                                    Path(temp_dir) / "missing-machine.json"
+                                ),
+                            },
                             text=True,
                             capture_output=True,
                             check=False,

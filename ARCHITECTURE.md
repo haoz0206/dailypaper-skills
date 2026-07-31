@@ -108,9 +108,9 @@ Run 还是 Vault 仍由各领域模块决定，因此共享 parser 不会扩大�
 规范源文件经有界 nofollow 读取，目标树在排序/比较前限制 entry 与深度；重复资源、
 symlink 和特殊文件会阻止同步，目标文件使用 durable atomic replace。`--check`
 同时检测内容、额外文件和空目录漂移；正式同步会清理过期生成资源和安装目录中的
-隐式配置覆盖。研究范围只由 Vault 共享配置提供；机器路径只由跨 Harness 的
-machine config 提供，因此四个独立安装包不会因各自的
-`user-config.local.json` 产生配置和指纹漂移。
+隐式配置覆盖。研究范围只由版本化 Vault 共享配置提供；机器路径只由跨 Harness
+的 machine config 提供，因此四个独立安装包不会因升级或各自产生隐式 overlay
+而发生配置和指纹漂移。
 
 三步流水线的设计主要是为了控制单次上下文长度。入口只调用
 `run_coordinator.py start`，由协调器完成 onboarding 验证、必要的 bootstrap、
@@ -132,8 +132,10 @@ bootstrap，保留当前 run 已落盘但尚未 checkpoint 的合法 artifact，
 入口；重复 key、`NaN` 和非 object 根在进入领域逻辑前即被拒绝。普通持久化文件也
 通过该模块完成 durable atomic replace，而领域 CAS 和 journal 保留在其所有者中。
 所有配置规则集中在 `config_schema.py`。`user_config`、配置 Skill、Runtime Context
-和协调器指纹都经过这个 seam；它负责 overlay 白名单、规范化、路径隔离、固定
-仓库/时区策略以及 fingerprint。`user_config` 返回缓存内容的深拷贝，
+和协调器指纹都经过这个 seam；它负责版本化共享文档、legacy overlay 显式迁移、
+规范化、路径隔离、固定仓库/时区策略以及 fingerprint。已配置用户的有效设置来自
+机器文件与完整 Vault 快照，包内 defaults 只用于 bootstrap 和迁移。
+`user_config` 返回缓存内容的深拷贝，
 调用方不能通过修改 dict 污染后续阶段。机器 Zotero 路径最后注入，任何 Vault
 共享配置或本地 overlay 都不能覆盖它。
 
@@ -540,9 +542,10 @@ Zotero 集成是只读的。Skill 可以查询条目、分类和本地 PDF，并
 
 ## scripts/shared 公共模块
 
-### user-config.json
+### defaults.json
 
-所有路径、关键词、打分规则、自动化开关的集中配置：
+包内只读 bootstrap 默认值。它不是用户配置，也不能作为安装后的隐式 overlay；
+用户拥有的完整共享设置位于 Vault 的 `.dailypaper/config.json`：
 
 ```json
 {

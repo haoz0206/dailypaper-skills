@@ -274,25 +274,13 @@ def _record_acquisition(
 
 
 def _bootstrap_config() -> dict:
-    return {
-        "paths": {
-            "obsidian_vault": ".",
-        },
-        "runtime": {
-            "timezone": FIXED_TIMEZONE,
-        },
-        "repository": {
-            "url": FIXED_VAULT_URL,
-            "remote": FIXED_REMOTE,
-            "branch": FIXED_BRANCH,
-            "task_state_file": FIXED_TASK_STATE_FILE,
-            "pull_before_run": True,
-            "require_clean": True,
-            "coordination_enabled": True,
-            "lease_hours": 24,
-            "same_day_policy": "skip",
-        },
-    }
+    effective = copy.deepcopy(DEFAULT_CONFIG)
+    effective["runtime"]["timezone"] = FIXED_TIMEZONE
+    effective["repository"]["url"] = FIXED_VAULT_URL
+    effective["repository"]["remote"] = FIXED_REMOTE
+    effective["repository"]["branch"] = FIXED_BRANCH
+    effective["repository"]["task_state_file"] = FIXED_TASK_STATE_FILE
+    return config_schema.materialize_shared_config(effective, effective)
 
 
 def _bootstrap_git_dir(vault: Path) -> Path:
@@ -573,10 +561,11 @@ def _validate_bootstrap_config_bytes(content: bytes) -> None:
         )
         defaults = copy.deepcopy(DEFAULT_CONFIG)
         defaults["repository"]["url"] = FIXED_VAULT_URL
-        config_schema.validate_overlay(
+        config_schema.validate_shared_config(
             config,
             defaults,
             defaults,
+            allow_legacy=True,
         )
     except config_schema.ConfigurationError as exc:
         raise CoordinationError("invalid-config", str(exc)) from exc

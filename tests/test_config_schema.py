@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import copy
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -27,9 +29,20 @@ class ConfigurationSchemaTests(unittest.TestCase):
         )
         self.assertEqual(validated["daily_papers"]["top_n"], 30)
 
-        first = user_config.load_user_config()
-        first["daily_papers"]["top_n"] = 1
-        second = user_config.load_user_config()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(
+                os.environ,
+                {
+                    "DAILYPAPER_MACHINE_CONFIG": str(
+                        Path(temp_dir) / "missing-machine.json"
+                    )
+                },
+                clear=True,
+            ):
+                user_config.clear_config_cache()
+                first = user_config.load_user_config()
+                first["daily_papers"]["top_n"] = 1
+                second = user_config.load_user_config()
         self.assertEqual(second["daily_papers"]["top_n"], 30)
 
     def test_overlay_rejects_machine_paths_fixed_policy_and_unknown_fields(self) -> None:
@@ -62,6 +75,54 @@ class ConfigurationSchemaTests(unittest.TestCase):
                         self.defaults,
                         self.defaults,
                     )
+
+    def test_versioned_shared_config_is_complete_and_pins_user_values(self) -> None:
+        effective = copy.deepcopy(self.defaults)
+        effective["daily_papers"]["top_n"] = 17
+        document = config_schema.materialize_shared_config(
+            effective,
+            self.defaults,
+        )
+        changed_defaults = copy.deepcopy(self.defaults)
+        changed_defaults["daily_papers"]["top_n"] = 99
+
+        payload = config_schema.validate_shared_config(
+            document,
+            changed_defaults,
+            self.defaults,
+        )
+        merged = config_schema.deep_merge(changed_defaults, payload)
+
+        self.assertEqual(document["schema_version"], 1)
+        self.assertNotIn("zotero_db", document["paths"])
+        self.assertEqual(merged["daily_papers"]["top_n"], 17)
+
+    def test_legacy_shared_config_requires_explicit_migration(self) -> None:
+        legacy = {"daily_papers": {"top_n": 17}}
+
+        with self.assertRaisesRegex(
+            config_schema.ConfigurationMigrationRequired,
+            "explicitly approve migration",
+        ):
+            config_schema.validate_shared_config(
+                legacy,
+                self.defaults,
+                self.defaults,
+            )
+        payload = config_schema.validate_shared_config(
+            legacy,
+            self.defaults,
+            self.defaults,
+            allow_legacy=True,
+        )
+        self.assertEqual(payload, legacy)
+
+    def test_unknown_shared_schema_version_is_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            config_schema.ConfigurationError,
+            "Unsupported shared Vault configuration schema_version 2",
+        ):
+            config_schema.shared_config_version({"schema_version": 2})
 
     def test_effective_paths_must_be_distinct_non_reserved_directories(self) -> None:
         cases = (

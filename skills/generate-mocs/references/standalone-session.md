@@ -21,8 +21,13 @@ python3 "{SKILL_ROOT}/scripts/shared/standalone_coordinator.py" start \
 - `start` owns machine-onboarding validation, clean-clone fast-forward,
   fresh remote DailyPaper Task State inspection, configuration freezing, and
   the local Vault writer lock. Never reproduce those steps in a Skill prompt.
+- Frozen settings come only from the machine configuration and the versioned
+  Vault configuration. Bundled `defaults.json` is a read-only bootstrap and
+  migration resource, never an installed user's implicit configuration.
 - If machine onboarding is missing or invalid, stop and ask the user to run
   `configure-dailypaper`; never guess a Vault from the current directory.
+- If the shared configuration requires migration, stop and ask the user to run
+  `configure-dailypaper` and explicitly approve that migration.
 - `still-running` means the existing session still owns the clone-wide Vault
   writer lock. Show the returned exact `session_id` to the user and stop. Do
   not infer abandonment from elapsed time, and never preempt it automatically.

@@ -115,8 +115,8 @@ DEFAULT_CONFIG = {
 def _load_user_config() -> dict:
     config_dir = Path(__file__).resolve().parent
     bundled = config_schema.load_json_object(
-        config_dir / "user-config.json",
-        label="Bundled configuration",
+        config_dir / "defaults.json",
+        label="Bundled read-only defaults",
     )
     config_schema.validate_effective_config(bundled, DEFAULT_CONFIG)
     overlays: list[dict] = []
@@ -136,10 +136,15 @@ def _load_user_config() -> dict:
             else None
         )
     if config_path is not None and config_path.exists():
+        shared_document = config_schema.load_json_object(
+            config_path,
+            label="Shared Vault configuration",
+        )
         overlays.append(
-            config_schema.load_json_object(
-                config_path,
-                label="Shared Vault configuration",
+            config_schema.validate_shared_config(
+                shared_document,
+                bundled,
+                DEFAULT_CONFIG,
             )
         )
 

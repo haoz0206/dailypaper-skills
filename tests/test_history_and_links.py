@@ -1,3 +1,4 @@
+import copy
 import importlib.util
 import json
 import os
@@ -33,13 +34,14 @@ class HistoryAndLinksTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             config_path = root / "config.json"
+            effective = copy.deepcopy(user_config.DEFAULT_CONFIG)
+            effective["paths"]["daily_papers_folder"] = "ResearchDigest"
             config_path.write_text(
                 json.dumps(
-                    {
-                        "paths": {
-                            "daily_papers_folder": "ResearchDigest",
-                        }
-                    }
+                    user_config.config_schema.materialize_shared_config(
+                        effective,
+                        user_config.DEFAULT_CONFIG,
+                    )
                 ),
                 encoding="utf-8",
             )

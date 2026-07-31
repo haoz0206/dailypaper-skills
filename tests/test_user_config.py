@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import sys
@@ -21,6 +22,16 @@ import user_config
 
 
 class UserConfigTests(unittest.TestCase):
+    def _shared_document(self, **updates: object) -> dict:
+        effective = copy.deepcopy(user_config.DEFAULT_CONFIG)
+        for section, value in updates.items():
+            assert isinstance(value, dict)
+            effective[section].update(value)
+        return user_config.config_schema.materialize_shared_config(
+            effective,
+            user_config.DEFAULT_CONFIG,
+        )
+
     def tearDown(self) -> None:
         user_config.clear_config_cache()
 
@@ -42,7 +53,7 @@ class UserConfigTests(unittest.TestCase):
             workspace = Path(temp_dir)
             config_path = workspace / "config.json"
             config_path.write_text(
-                json.dumps({"paths": {"obsidian_vault": "."}}),
+                json.dumps(self._shared_document()),
                 encoding="utf-8",
             )
             with patch.dict(
@@ -65,10 +76,10 @@ class UserConfigTests(unittest.TestCase):
     def test_push_without_commit_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "config.json"
+            document = self._shared_document()
+            document["automation"]["git_push"] = True
             config_path.write_text(
-                json.dumps(
-                    {"automation": {"git_commit": False, "git_push": True}}
-                ),
+                json.dumps(document),
                 encoding="utf-8",
             )
             with patch.dict(
@@ -86,10 +97,10 @@ class UserConfigTests(unittest.TestCase):
     def test_commit_without_push_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "config.json"
+            document = self._shared_document()
+            document["automation"]["git_commit"] = True
             config_path.write_text(
-                json.dumps(
-                    {"automation": {"git_commit": True, "git_push": False}}
-                ),
+                json.dumps(document),
                 encoding="utf-8",
             )
             with patch.dict(
@@ -127,11 +138,76 @@ class UserConfigTests(unittest.TestCase):
 
     def test_tracked_config_contains_no_personal_absolute_path(self) -> None:
         config = json.loads(
-            (SHARED_DIR / "user-config.json").read_text(encoding="utf-8")
+            (SHARED_DIR / "defaults.json").read_text(encoding="utf-8")
         )
         paths = config["paths"]
         self.assertEqual(paths["obsidian_vault"], ".")
         self.assertNotIn("/Users/", json.dumps(paths))
+
+    def test_legacy_vault_configuration_is_not_silently_loaded(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.json"
+            config_path.write_text(
+                json.dumps({"daily_papers": {"top_n": 12}}),
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "DAILYPAPER_CONFIG": str(config_path),
+                    "DAILYPAPER_MACHINE_CONFIG": str(
+                        Path(temp_dir) / "missing-machine-config.json"
+                    ),
+                },
+                clear=False,
+            ):
+                user_config.clear_config_cache()
+                with self.assertRaisesRegex(
+                    user_config.config_schema.ConfigurationMigrationRequired,
+                    "configure-dailypaper",
+                ):
+                    user_config.load_user_config()
+
+    def test_versioned_vault_config_is_stable_when_bundled_defaults_change(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config.json"
+            document = self._shared_document()
+            document["daily_papers"]["top_n"] = 17
+            config_path.write_text(json.dumps(document), encoding="utf-8")
+            changed_defaults = copy.deepcopy(user_config.DEFAULT_CONFIG)
+            changed_defaults["daily_papers"]["top_n"] = 99
+            real_load = user_config.config_schema.load_json_object
+
+            def load_with_updated_package(path: Path, **kwargs: object) -> dict:
+                if Path(path).name == "defaults.json":
+                    return copy.deepcopy(changed_defaults)
+                return real_load(path, **kwargs)
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "DAILYPAPER_CONFIG": str(config_path),
+                        "DAILYPAPER_MACHINE_CONFIG": str(
+                            root / "missing-machine.json"
+                        ),
+                    },
+                    clear=True,
+                ),
+                patch.object(
+                    user_config.config_schema,
+                    "load_json_object",
+                    side_effect=load_with_updated_package,
+                ),
+            ):
+                user_config.clear_config_cache()
+                self.assertEqual(
+                    user_config.daily_papers_config()["top_n"],
+                    17,
+                )
 
     def test_default_output_paths_match_shared_harness_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -160,7 +236,18 @@ class UserConfigTests(unittest.TestCase):
                 )
 
     def test_default_repository_matches_coordinated_vault(self) -> None:
-        repository = user_config.repository_config()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(
+                os.environ,
+                {
+                    "DAILYPAPER_MACHINE_CONFIG": str(
+                        Path(temp_dir) / "missing-machine.json"
+                    )
+                },
+                clear=True,
+            ):
+                user_config.clear_config_cache()
+                repository = user_config.repository_config()
         self.assertEqual(
             repository["url"],
             "git@github.com:haoz0206/dailypaper-vault.git",

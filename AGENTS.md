@@ -111,8 +111,10 @@ only when unique, and ambiguity must never select or overwrite a note.
 
 ## Configuration and safety
 
-- Tracked defaults live in
-  `skills/daily-papers/scripts/shared/user-config.json`.
+- Read-only bootstrap defaults live in
+  `skills/daily-papers/scripts/shared/defaults.json`; they are not installed
+  user configuration. Machine settings live outside the Skill and portable
+  user settings live as a complete versioned Vault configuration.
 - Research settings belong in the shared Vault configuration. Machine-local
   Vault and optional Zotero paths belong only in the cross-Harness machine
   file; installed Skill directories never carry implicit local overlays.

@@ -322,7 +322,7 @@ class HarnessContractTests(unittest.TestCase):
 
     def test_default_business_configuration_matches_unified_contract(self) -> None:
         config = json.loads(
-            (SUITE_ROOT / "scripts" / "shared" / "user-config.json").read_text(
+            (SUITE_ROOT / "scripts" / "shared" / "defaults.json").read_text(
                 encoding="utf-8"
             )
         )
@@ -389,7 +389,7 @@ class HarnessContractTests(unittest.TestCase):
 
     def test_repository_contract_is_fixed(self) -> None:
         config = json.loads(
-            (SUITE_ROOT / "scripts" / "shared" / "user-config.json").read_text(
+            (SUITE_ROOT / "scripts" / "shared" / "defaults.json").read_text(
                 encoding="utf-8"
             )
         )

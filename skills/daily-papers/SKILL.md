@@ -37,6 +37,8 @@ description: |
 ## 跨 Harness 契约
 
 - Canonical 自然语言输入、Vault 路径、Markdown schema 和 Git 协调结果保持一致。
+- 运行配置只取自跨 Harness 的本机配置与版本化 Vault 配置；包内 defaults 是只读
+  bootstrap/迁移资源，不是用户设置。
 - Harness 身份只作为运行时协调字段；不得切换 Skills 分支或输出目录。
 - 支持 Subagent 时按 workflow 明确委派；不支持时执行相同的 inline 流程。
 - Vault 锁、run manifest、最终验证和 Git 发布始终由公开父 workflow 所有。

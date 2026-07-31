@@ -20,9 +20,11 @@ from safe_path import SafePathError, relative_posix_path
 
 
 MAX_CONFIG_BYTES = 1024 * 1024
+SHARED_CONFIG_VERSION = 1
 TOP_LEVEL_FIELDS = frozenset(
     {"paths", "runtime", "repository", "daily_papers", "automation"}
 )
+SHARED_DOCUMENT_FIELDS = TOP_LEVEL_FIELDS | {"schema_version"}
 PATH_FIELDS = frozenset(
     {
         "obsidian_vault",
@@ -86,6 +88,10 @@ RESERVED_VAULT_ROOTS = frozenset({".git", ".dailypaper"})
 
 class ConfigurationError(ValueError):
     """Configuration data is malformed, unsupported, or unsafe."""
+
+
+class ConfigurationMigrationRequired(ConfigurationError):
+    """A legacy shared configuration must be explicitly migrated."""
 
 
 def load_json_object(
@@ -412,6 +418,120 @@ def validate_overlay(
     candidate = deep_merge(copy.deepcopy(base), overlay)
     validate_effective_config(candidate, defaults)
     return overlay
+
+
+def shared_config_version(document: Any) -> int:
+    """Return 0 for a legacy overlay or the declared shared schema version."""
+    if not isinstance(document, dict):
+        raise ConfigurationError("Shared Vault configuration must be a JSON object")
+    if "schema_version" not in document:
+        return 0
+    version = document["schema_version"]
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise ConfigurationError(
+            "Shared Vault configuration schema_version must be an integer"
+        )
+    if version != SHARED_CONFIG_VERSION:
+        raise ConfigurationError(
+            "Unsupported shared Vault configuration schema_version "
+            f"{version}; this Skill supports {SHARED_CONFIG_VERSION}"
+        )
+    return version
+
+
+def materialize_shared_config(
+    effective: dict[str, Any],
+    defaults: dict[str, Any],
+) -> dict[str, Any]:
+    """Create one complete, versioned, portable user-owned configuration."""
+    validate_effective_config(effective, defaults)
+    document = {
+        "schema_version": SHARED_CONFIG_VERSION,
+        "paths": {
+            field: copy.deepcopy(effective["paths"][field])
+            for field in sorted(SHARED_PATH_FIELDS)
+        },
+        "runtime": copy.deepcopy(effective["runtime"]),
+        "repository": copy.deepcopy(effective["repository"]),
+        "daily_papers": copy.deepcopy(effective["daily_papers"]),
+        "automation": copy.deepcopy(effective["automation"]),
+    }
+    validate_shared_config(document, effective, defaults)
+    return document
+
+
+def validate_shared_config(
+    document: Any,
+    base: dict[str, Any],
+    defaults: dict[str, Any],
+    *,
+    allow_legacy: bool = False,
+) -> dict[str, Any]:
+    """Validate a shared document and return its portable configuration payload."""
+    version = shared_config_version(document)
+    if version == 0:
+        validate_overlay(document, base, defaults)
+        if not allow_legacy:
+            raise ConfigurationMigrationRequired(
+                "Shared Vault configuration uses the legacy unversioned overlay "
+                "format; run configure-dailypaper and explicitly approve migration"
+            )
+        return copy.deepcopy(document)
+
+    if not isinstance(document, dict):
+        raise ConfigurationError("Shared Vault configuration must be a JSON object")
+    unknown_top = set(document) - SHARED_DOCUMENT_FIELDS
+    if unknown_top:
+        raise ConfigurationError(
+            "Shared Vault configuration contains unsupported sections: "
+            + ", ".join(sorted(unknown_top))
+        )
+    shared = _require_exact_fields(
+        document,
+        SHARED_DOCUMENT_FIELDS,
+        "Shared Vault configuration",
+    )
+    if not isinstance(shared["paths"], dict):
+        raise ConfigurationError("Shared Vault configuration paths must be an object")
+    unknown_paths = set(shared["paths"]) - SHARED_PATH_FIELDS
+    if unknown_paths:
+        raise ConfigurationError(
+            "Shared Vault configuration contains unsupported paths fields: "
+            + ", ".join(sorted(unknown_paths))
+        )
+    _require_exact_fields(
+        shared["paths"],
+        SHARED_PATH_FIELDS,
+        "Shared Vault configuration paths",
+    )
+    _require_exact_fields(
+        shared["runtime"],
+        frozenset({"timezone"}),
+        "Shared Vault configuration runtime",
+    )
+    _require_exact_fields(
+        shared["repository"],
+        REPOSITORY_FIELDS,
+        "Shared Vault configuration repository",
+    )
+    _require_exact_fields(
+        shared["daily_papers"],
+        DAILY_FIELDS,
+        "Shared Vault configuration daily_papers",
+    )
+    _require_exact_fields(
+        shared["automation"],
+        AUTOMATION_FIELDS,
+        "Shared Vault configuration automation",
+    )
+    payload = {
+        key: copy.deepcopy(value)
+        for key, value in shared.items()
+        if key != "schema_version"
+    }
+    candidate = deep_merge(copy.deepcopy(base), payload)
+    validate_effective_config(candidate, defaults)
+    return payload
 
 
 def merge_validated_overlays(

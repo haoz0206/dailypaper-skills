@@ -94,7 +94,18 @@ class ZoteroReadonlyTests(unittest.TestCase):
     def test_recursive_collection_query_is_parameterized_and_cycle_safe(
         self,
     ) -> None:
-        module = load_zotero_helper()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(
+                os.environ,
+                {
+                    "DAILYPAPER_MACHINE_CONFIG": str(
+                        Path(temp_dir) / "missing-machine.json"
+                    )
+                },
+                clear=True,
+            ):
+                user_config.clear_config_cache()
+                module = load_zotero_helper()
         self.addCleanup(module._TEMP_DIR.cleanup)
         with closing(sqlite3.connect(":memory:")) as connection:
             connection.executescript(
