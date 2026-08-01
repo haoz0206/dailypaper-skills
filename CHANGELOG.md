@@ -11,6 +11,23 @@ as breaking changes.
 
 Nothing yet.
 
+## [1.2.1] - 2026-08-01
+
+### Changed
+
+- The review stage now derives its research profile and recommendation
+  frontmatter from the frozen Runtime Context without retaining a built-in
+  robotics or world-model bias.
+- The installer smoke test now covers a clean copied install plus exact copied
+  and default symlinked four-Skill upgrades from the previous release while
+  proving that machine and Vault configuration remain untouched.
+
+### Fixed
+
+- Legacy configuration migrations can resume from their journal after an
+  interruption, and matching publication receipts produced by the previous
+  unversioned configuration format remain readable.
+
 ## [1.2.0] - 2026-07-31
 
 ### Added
@@ -116,7 +133,8 @@ First formal release of the maintained unified-harness derivative.
   [huangkiki/dailypaper-skills](https://github.com/huangkiki/dailypaper-skills)
   under Apache-2.0. See `NOTICE`.
 
-[Unreleased]: https://github.com/haoz0206/dailypaper-skills/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/haoz0206/dailypaper-skills/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/haoz0206/dailypaper-skills/releases/tag/v1.2.1
 [1.2.0]: https://github.com/haoz0206/dailypaper-skills/releases/tag/v1.2.0
 [1.1.0]: https://github.com/haoz0206/dailypaper-skills/releases/tag/v1.1.0
 [1.0.0]: https://github.com/haoz0206/dailypaper-skills/releases/tag/v1.0.0

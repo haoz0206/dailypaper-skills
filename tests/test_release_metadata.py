@@ -11,7 +11,7 @@ class ReleaseMetadataTests(unittest.TestCase):
     def test_readme_uses_versioned_install_and_preserves_attribution(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-        self.assertIn("dailypaper-skills.git#v1.2.0", readme)
+        self.assertIn("dailypaper-skills.git#v1.2.1", readme)
         self.assertIn("npx --yes skills@1.5.20 add", readme)
         self.assertIn("Node.js | 22.20.0+", readme)
         self.assertIn("GitHub Releases", readme)
@@ -55,6 +55,7 @@ class ReleaseMetadataTests(unittest.TestCase):
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
         self.assertIn("## [Unreleased]", changelog)
+        self.assertIn("## [1.2.1] - 2026-08-01", changelog)
         self.assertIn("## [1.2.0] - 2026-07-31", changelog)
         self.assertIn("## [1.1.0] - 2026-07-30", changelog)
         self.assertIn("## [1.0.0] - 2026-07-30", changelog)
@@ -63,6 +64,7 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertIn("[1.0.0]:", changelog)
         self.assertIn("[1.1.0]:", changelog)
         self.assertIn("[1.2.0]:", changelog)
+        self.assertIn("[1.2.1]:", changelog)
 
     def test_release_workflow_is_tagged_main_only_and_regenerates_notes(self) -> None:
         workflow = (

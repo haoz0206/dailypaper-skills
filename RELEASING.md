@@ -36,7 +36,12 @@ feature branch.
 5. Validate each public `SKILL.md` with the target harness validator.
 6. Confirm the installer smoke test used the version pinned in `README.md`,
    installed all four Skills into Claude Code and Codex, produced identical
-   copies, and compiled both installed trees.
+   copied trees or the expected Codex-canonical/Claude-symlink topology,
+   upgraded the previous immutable release to the candidate tree, preserved
+   machine and Vault configuration sentinels, and compiled both clean and
+   upgraded trees. Update `PREVIOUS_RELEASE_SOURCE` in
+   `tools/installer_smoke.py` to the release immediately preceding the
+   candidate.
 7. Commit the release preparation and merge it into `main`.
 
 ## Publish

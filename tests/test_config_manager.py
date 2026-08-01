@@ -1,4 +1,6 @@
+import base64
 import copy
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -157,6 +159,100 @@ class ConfigManagerTests(unittest.TestCase):
         ):
             yield
 
+    def _publish_legacy_configuration(
+        self,
+        vault: Path,
+        config_path: Path,
+        remote: Path,
+    ) -> bytes:
+        legacy = {
+            "paths": {"obsidian_vault": "."},
+            "repository": {
+                "url": str(remote),
+                "remote": "origin",
+                "branch": "main",
+            },
+            "daily_papers": {"top_n": 17},
+        }
+        config_path.write_text(json.dumps(legacy), encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(vault), "add", ".dailypaper/config.json"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(vault),
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "legacy config",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(vault), "push", "origin", "main"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return config_path.read_bytes()
+
+    def _write_transaction_fixture(
+        self,
+        vault: Path,
+        *,
+        before: bytes,
+        after: bytes,
+        base_head: str,
+        commit: str | None,
+        outcome: str | None,
+    ) -> None:
+        git_common_dir = Path(
+            subprocess.run(
+                ["git", "-C", str(vault), "rev-parse", "--git-common-dir"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+        if not git_common_dir.is_absolute():
+            git_common_dir = vault / git_common_dir
+        transaction_path = (
+            git_common_dir
+            / "dailypaper"
+            / "configuration-publication-v1.json"
+        )
+        transaction_path.parent.mkdir(parents=True)
+        transaction_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "base_head": base_head,
+                    "patch_sha256": "0" * 64,
+                    "before_sha256": hashlib.sha256(before).hexdigest(),
+                    "after_sha256": hashlib.sha256(after).hexdigest(),
+                    "before_base64": base64.b64encode(before).decode("ascii"),
+                    "after_base64": base64.b64encode(after).decode("ascii"),
+                    "started_at": "2026-01-01T00:00:00+00:00",
+                    "remote": "origin",
+                    "branch": "main",
+                    "commit": commit,
+                    "outcome": outcome,
+                    "changes": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
     def test_plan_normalizes_keywords_and_pins_daily_section(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -258,45 +354,7 @@ class ConfigManagerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             remote, vault, config_path = self._publication_vault(root)
-            legacy = {
-                "paths": {"obsidian_vault": "."},
-                "repository": {
-                    "url": str(remote),
-                    "remote": "origin",
-                    "branch": "main",
-                },
-                "daily_papers": {"top_n": 17},
-            }
-            config_path.write_text(json.dumps(legacy), encoding="utf-8")
-            subprocess.run(
-                ["git", "-C", str(vault), "add", ".dailypaper/config.json"],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(vault),
-                    "-c",
-                    "user.name=test",
-                    "-c",
-                    "user.email=test@example.com",
-                    "commit",
-                    "-m",
-                    "legacy config",
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            subprocess.run(
-                ["git", "-C", str(vault), "push", "origin", "main"],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            self._publish_legacy_configuration(vault, config_path, remote)
             patch_path = root / "migration.json"
             patch_path.write_text(
                 json.dumps(
@@ -317,6 +375,155 @@ class ConfigManagerTests(unittest.TestCase):
             self.assertEqual(result["status"], "published")
             self.assertEqual(written["schema_version"], 1)
             self.assertEqual(effective["daily_papers"]["top_n"], 17)
+
+    def test_resume_publishes_a_journaled_legacy_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            remote, vault, config_path = self._publication_vault(root)
+            self._publish_legacy_configuration(vault, config_path, remote)
+            patch_path = root / "migration.json"
+            patch_path.write_text(
+                json.dumps({"migration": {"target_schema_version": 1}}),
+                encoding="utf-8",
+            )
+
+            def interrupt(name: str) -> None:
+                if name == "after-transaction":
+                    raise config_manager.ConfigError("simulated interruption")
+
+            with (
+                self._repository_contract(remote),
+                patch.object(
+                    config_manager,
+                    "_configuration_failpoint",
+                    side_effect=interrupt,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    config_manager.ConfigError,
+                    "simulated interruption",
+                ):
+                    config_manager.apply_plan(vault, config_path, patch_path)
+            patch_path.unlink()
+
+            with self._repository_contract(remote):
+                recovered = config_manager.resume_publication(vault, config_path)
+                effective = config_manager.validate_config(config_path)
+
+            self.assertEqual(recovered["status"], "published")
+            self.assertEqual(effective["daily_papers"]["top_n"], 17)
+            self.assertEqual(
+                json.loads(config_path.read_text(encoding="utf-8"))["schema_version"],
+                1,
+            )
+
+    def test_resume_accepts_a_matching_published_legacy_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            remote, vault, config_path = self._publication_vault(root)
+            before = config_path.read_bytes()
+            base_head = subprocess.run(
+                ["git", "-C", str(vault), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            after = self._publish_legacy_configuration(vault, config_path, remote)
+            commit = subprocess.run(
+                ["git", "-C", str(vault), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            self._write_transaction_fixture(
+                vault,
+                before=before,
+                after=after,
+                base_head=base_head,
+                commit=commit,
+                outcome="published",
+            )
+
+            with self._repository_contract(remote):
+                recovered = config_manager.resume_publication(vault, config_path)
+
+            self.assertEqual(recovered["status"], "already-published")
+            self.assertEqual(recovered["commit"], commit)
+
+    def test_resume_rejects_a_pending_legacy_after_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            remote, vault, config_path = self._publication_vault(root)
+            before = config_path.read_bytes()
+            base_head = subprocess.run(
+                ["git", "-C", str(vault), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            legacy = {
+                "paths": {"obsidian_vault": "."},
+                "repository": {
+                    "url": str(remote),
+                    "remote": "origin",
+                    "branch": "main",
+                },
+                "daily_papers": {"top_n": 17},
+            }
+            after = (json.dumps(legacy) + "\n").encode("utf-8")
+            self._write_transaction_fixture(
+                vault,
+                before=before,
+                after=after,
+                base_head=base_head,
+                commit=None,
+                outcome=None,
+            )
+            index_before = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(vault),
+                    "show",
+                    ":.dailypaper/config.json",
+                ],
+                check=True,
+                capture_output=True,
+            ).stdout
+
+            with (
+                self._repository_contract(remote),
+                self.assertRaisesRegex(
+                    config_manager.ConfigError,
+                    "explicitly approve migration",
+                ),
+            ):
+                config_manager.resume_publication(vault, config_path)
+
+            self.assertEqual(config_path.read_bytes(), before)
+            self.assertEqual(
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(vault),
+                        "show",
+                        ":.dailypaper/config.json",
+                    ],
+                    check=True,
+                    capture_output=True,
+                ).stdout,
+                index_before,
+            )
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "-C", str(vault), "status", "--porcelain"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout,
+                "",
+            )
 
     def test_apply_writes_valid_config_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

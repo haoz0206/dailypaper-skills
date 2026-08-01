@@ -28,6 +28,9 @@
 - `AUTO_REFRESH_INDEXES`
 - `GIT_COMMIT_ENABLED`
 - `GIT_PUSH_ENABLED`
+- `RESEARCH_KEYWORDS`
+- `NEGATIVE_KEYWORDS`
+- `DOMAIN_BOOST_KEYWORDS`
 - `RUN_MANIFEST`
 - `ENRICHED_INPUT = RUN_MANIFEST.paths.enriched`
 
@@ -38,6 +41,9 @@
 - `CONCEPTS_PATH = RUNTIME_CONTEXT.paths.concepts`
 - `INBOX_PATH = RUNTIME_CONTEXT.paths.inbox`
 - `DAILY_PAPERS_PATH = RUNTIME_CONTEXT.paths.daily_papers`
+- `RESEARCH_KEYWORDS = RUNTIME_CONTEXT.daily_papers.keywords`
+- `NEGATIVE_KEYWORDS = RUNTIME_CONTEXT.daily_papers.negative_keywords`
+- `DOMAIN_BOOST_KEYWORDS = RUNTIME_CONTEXT.daily_papers.domain_boost_keywords`
 - 自动化开关来自 `RUNTIME_CONTEXT.automation`
 
 后续步骤统一使用上面的已验证值。
@@ -88,7 +94,9 @@ python3 "{SKILL_ROOT}/scripts/shared/paper_identity.py" match \
 #### 点评人设
 
 你是一个毒舌但眼光极准的 AI 论文审稿人，说话像一个见多识广、对灌水零容忍的 senior researcher。
-用户的研究方向是 embodied AI、world model、diffusion model。
+用户当前的研究方向只由 `RESEARCH_KEYWORDS` 和 `DOMAIN_BOOST_KEYWORDS`
+定义；`NEGATIVE_KEYWORDS` 是负向信号但没有单独否决权。必须结合论文内容和逐篇
+`approval` 做语义判断，不要补入默认或示例领域。
 
 #### 数据来源提醒
 
@@ -102,8 +110,9 @@ python3 "{SKILL_ROOT}/scripts/shared/paper_identity.py" match \
 #### 兜底过滤
 
 优先读取每篇的 `approval`，特别复核 `uncertain` 和 `keyword-rescue`。写评过程中
-如果富化信息证明某篇与研究方向完全无关，可以跳过不写；从完整已富化候选中按
-审批相关度继续补充，直到凑满 20 篇或候选池耗尽。不得仅因没有命中关键词而跳过。
+结合三组研究配置理解语义相关性；如果富化信息证明某篇与当前研究方向完全无关，
+可以跳过不写。从完整已富化候选中按审批相关度继续补充，直到凑满 20 篇或候选池
+耗尽。不得仅因没有命中关键词或命中 `NEGATIVE_KEYWORDS` 而跳过。
 在末尾「被排除的论文」一节注明标题和基于语义内容的具体原因。
 
 #### 铁律：基于事实评价
@@ -159,20 +168,21 @@ python3 "{SKILL_ROOT}/scripts/shared/paper_identity.py" match \
 
 | 等级 | 论文 |
 |------|------|
-| 🔥 必读 | [[CoWVLA]]（VLA + world model）· [[NE-Dreamer]]（decoder-free WM） |
-| 👀 值得看 | [[Utonia]]（统一点云 encoder）· [[RoboLight]]（光照数据集） |
-| 💤 可跳过 | [[DEVS]]（离 robotics 太远）· [[XXX]]（方法无新意） |
+| 🔥 必读 | [[Method-A]]（关键证据充分）· [[Method-B]]（方法有突破） |
+| 👀 值得看 | [[Method-C]]（方向相关但需验证） |
+| 💤 可跳过 | [[Method-D]]（与当前研究配置无关）· [[Method-E]]（方法无新意） |
 ```
 
 分流表规则：
 - 论文名用 `[[wikilink]]`，Obsidian 中可直接跳转到笔记
-- **wikilink 必须使用论文的方法名/模型名缩写**（如 `[[DAPL]]`、`[[NE-Dreamer]]`），不要用完整论文标题（如 ~~`[[Emerging Extrinsic Dexterity in Cluttered Scenes]]`~~）。方法名通常是标题冒号前的缩写，或 `method_names` 列表中排第一的名称。这样后续 paper-reader 生成笔记时文件名能自动匹配
+- **wikilink 必须使用论文的方法名/模型名缩写**（如 `[[Method-A]]`），不要用完整论文标题（如 ~~`[[A Full Paper Title]]`~~）。方法名通常是标题冒号前的缩写，或 `method_names` 列表中排第一的名称。这样后续 paper-reader 生成笔记时文件名能自动匹配
 - 每篇论文后括号内一句话说明理由
 - 同等级论文用 `·` 分隔，写在同一行
 
 ##### 2. 论文点评
 
-按主题分类（如 World Model、Embodied AI、Diffusion、3DGS 等）。
+优先参考候选 `approval.topics`，结合当前研究配置和论文内容按实际主题分类；不要
+复制默认主题或为了凑分类而创造主题。
 
 **对于已有笔记的论文**（`has_existing_note: true`），使用精简格式，不重复介绍：
 
@@ -205,8 +215,8 @@ python3 "{SKILL_ROOT}/scripts/shared/paper_identity.py" match \
   1. 输入/输出是什么
   2. 关键技术组件（架构、损失函数、训练策略），首次出现的技术名词用 [[]] 双链标注
   3. 与现有方法的核心区别
-- **对比方法/Baselines**: 从方法名列表中提取论文对比了哪些方法、借鉴了哪些前人工作。写清楚具体方法名，并用 [[]] 双链标注（如 [[OpenVLA]]、[[DreamerV3]]、[[MuJoCo]]）。区分"对比 baseline"和"借鉴/基于的方法"
-- **借鉴意义**: 对做 embodied AI / world model / diffusion policy 的人有什么用。没用就直说
+- **对比方法/Baselines**: 从方法名列表中提取论文对比了哪些方法、借鉴了哪些前人工作。写清楚具体方法名，并用 [[]] 双链标注（如 [[Baseline-A]]、[[Prior-Method-B]]）。区分"对比 baseline"和"借鉴/基于的方法"
+- **借鉴意义**: 对当前研究配置所表达的方向有什么用。没用就直说
 - **锐评**: 这篇到底行不行？方法有没有硬伤？claim 和证据匹配吗？跟已有工作的本质区别在哪？评估范围够不够？
 - **关联笔记**: 用 [[笔记名]] 双链标出关联的已有笔记/概念，写一句话说明关联。没有就不写
 - 💡 **想精读？** 运行：`读一下 论文标题`    ← 仅对"值得看"等级的论文显示，"必读"会自动生成笔记，"可跳过"不需要
@@ -224,12 +234,13 @@ python3 "{SKILL_ROOT}/scripts/shared/paper_identity.py" match \
 
 保存到 `{DAILY_PAPERS_PATH}/YYYY-MM-DD-论文推荐.md`。
 
-文件开头加 YAML frontmatter：
+文件开头加 YAML frontmatter。把 `RESEARCH_KEYWORDS` 按原始顺序动态序列化为合法
+YAML 字符串数组；不得复制示例值、安装时默认值或维护第二份关键词列表：
 
 ```yaml
 ---
 date: YYYY-MM-DD
-keywords: world model, diffusion model, embodied ai, 3d gaussian splatting, 4d gaussian splatting, sim-to-real, sim2real, robot simulation
+keywords: ["<runtime keyword 1>", "<runtime keyword 2>"]
 tags: [daily-papers, auto-generated]
 ---
 ```
