@@ -296,6 +296,34 @@ class HarnessContractTests(unittest.TestCase):
         self.assertIn('--runtime-context "{RUNTIME_CONTEXT_FILE}"', fetch)
         self.assertNotIn("--timezone", fetch)
 
+    def test_review_uses_runtime_research_profile_without_domain_bias(self) -> None:
+        review = (SUITE_ROOT / "workflows" / "review.md").read_text(
+            encoding="utf-8"
+        )
+
+        for binding in (
+            "RESEARCH_KEYWORDS = RUNTIME_CONTEXT.daily_papers.keywords",
+            "NEGATIVE_KEYWORDS = RUNTIME_CONTEXT.daily_papers.negative_keywords",
+            "DOMAIN_BOOST_KEYWORDS = RUNTIME_CONTEXT.daily_papers.domain_boost_keywords",
+        ):
+            self.assertIn(binding, review)
+        self.assertIn(
+            'keywords: ["<runtime keyword 1>", "<runtime keyword 2>"]',
+            review,
+        )
+        review_lower = review.lower()
+        for hardcoded_domain in (
+            "embodied ai",
+            "world model",
+            "robotics",
+            "cowvla",
+            "openvla",
+            "ne-dreamer",
+            "utonia",
+            "robolight",
+        ):
+            self.assertNotIn(hardcoded_domain, review_lower)
+
     def test_standalone_writers_guard_fresh_remote_task_state(self) -> None:
         contract = (
             SUITE_ROOT / "references" / "standalone-session.md"

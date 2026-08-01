@@ -85,11 +85,11 @@ brew install poppler
 
 ## 安装
 
-首个正式版本使用固定 tag 安装，避免后续分支变更悄悄改变已经部署的工作流：
+生产部署使用固定 tag 安装，避免后续分支变更悄悄改变已经部署的工作流：
 
 ```bash
 npx --yes skills@1.5.20 add \
-  "https://github.com/haoz0206/dailypaper-skills.git#v1.2.0" \
+  "https://github.com/haoz0206/dailypaper-skills.git#v1.2.1" \
   --skill configure-dailypaper daily-papers paper-reader generate-mocs \
   --agent claude-code codex \
   --global --yes
@@ -97,7 +97,7 @@ npx --yes skills@1.5.20 add \
 
 > [!NOTE]
 > 请先在 [GitHub Releases](https://github.com/haoz0206/dailypaper-skills/releases)
-> 确认 `v1.2.0` 已发布。tag 尚未发布时，上述命令不会成功；维护者测试或发布前验收
+> 确认 `v1.2.1` 已发布。tag 尚未发布时，上述命令不会成功；维护者测试或发布前验收
 > 应使用下面的开发 checkout。不要把 `main` 当作可复现的生产版本。
 
 安装器会在 `.agents/skills` 保存通用 Skill，并为支持的 harness 创建对应入口。
@@ -345,6 +345,9 @@ Skill，并让每次进程在
 
 - 升级：在确认没有 active run、Vault 工作树干净后，把安装命令中的 immutable tag
   改为目标版本并重新执行完整命令。使用过 `--copy` 时必须再次加上 `--copy`。
+- 固定 Release 的部署不要使用 `npx skills update` 代替上述完整命令。第三方安装器的
+  update 会按 lock 中记录的 ref 或默认分支寻找最新版；当旧 lock 没有保存 tag ref
+  时，它可能跟踪 `main`，而不是你明确选择的不可变 Release。
 - 回滚：先备份 Vault 与本机配置，再用旧的 immutable tag 重装。状态或配置 schema
   跨大版本不保证可逆；不要在 active run 中降级。
 - 卸载：下面的命令只移除 Harness 中的四个 Skill，不删除 Vault、机器配置或论文：

@@ -120,15 +120,22 @@ def _legacy_base_config() -> dict[str, Any]:
     return tracked
 
 
+def _validation_profile(
+    external: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    version = config_schema.shared_config_version(external)
+    base = _legacy_base_config() if version == 0 else _base_config()
+    validation_defaults = base if version == 0 else DEFAULT_CONFIG
+    return base, validation_defaults
+
+
 def load_effective_config(
     config_path: Path,
     *,
     allow_legacy: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     external = _load_json(config_path)
-    version = config_schema.shared_config_version(external)
-    base = _legacy_base_config() if version == 0 else _base_config()
-    validation_defaults = base if version == 0 else DEFAULT_CONFIG
+    base, validation_defaults = _validation_profile(external)
     payload = config_schema.validate_shared_config(
         external,
         base,
@@ -144,11 +151,17 @@ def normalize_daily_config(value: Any) -> dict[str, Any]:
     return config_schema.normalize_daily_config(value)
 
 
-def _validate_external_safety(external: dict[str, Any]) -> None:
+def _validate_external_safety(
+    external: dict[str, Any],
+    *,
+    allow_legacy: bool = False,
+) -> None:
+    base, validation_defaults = _validation_profile(external)
     config_schema.validate_shared_config(
         external,
-        _base_config(),
-        DEFAULT_CONFIG,
+        base,
+        validation_defaults,
+        allow_legacy=allow_legacy,
     )
 
 
@@ -531,12 +544,15 @@ def _load_transaction(path: Path) -> tuple[dict[str, Any], bytes, bytes]:
         before,
         label="Previous shared configuration",
     )
-    _validate_external_safety(previous)
+    _validate_external_safety(previous, allow_legacy=True)
     proposed = config_schema.parse_json_object(
         after,
         label="Proposed shared configuration",
     )
-    _validate_external_safety(proposed)
+    _validate_external_safety(
+        proposed,
+        allow_legacy=value["outcome"] == "published",
+    )
     return value, before, after
 
 
